@@ -145,8 +145,16 @@ void setup() {
   #if defined(WIFI)
     SendBroadcastUdp();
   #endif
-}
 
+  // SHIFT OUT - all OFF
+  #if defined(ShiftOut)
+    digitalWrite(ShiftOutLatchPin, LOW);  // after Latch LOW register ready to receive data
+    shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, B00000000);
+    shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, B00000000);
+    shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, B00000000);
+    digitalWrite(ShiftOutLatchPin, HIGH);    // after latch to HIGH data shows on output pins
+  #endif
+}
 //-------------------------------------------------------------------------------------------------------
 
 void loop() {
@@ -172,6 +180,7 @@ void GetBoardId(){
     RELAY_BOARD_ID = RELAY_BOARD_ID | (1<<3);    // Set the n-th bit
   }
 }
+//-------------------------------------------------------------------------------------------------------
 
 void RX_UDP(){
   UDPpacketSize = UdpCommand.parsePacket();    // if there's data available, read a packet
@@ -263,6 +272,7 @@ void RX_UDP(){
     memset(packetBuffer,0,sizeof(packetBuffer));    // clear array
   }
 }
+//-------------------------------------------------------------------------------------------------------
 
 void http(){
   // listen for incoming clients
@@ -346,6 +356,7 @@ void http(){
    #endif
   }
 }
+//-------------------------------------------------------------------------------------------------------
 
 void EthEvent(WiFiEvent_t event)
 {
@@ -384,6 +395,7 @@ void EthEvent(WiFiEvent_t event)
       break;
   }
 }
+//-------------------------------------------------------------------------------------------------------
 
 void SendBroadcastUdp(){
   BroadcastIP = ~ETH.subnetMask() | ETH.gatewayIP();
@@ -401,6 +413,7 @@ void SendBroadcastUdp(){
     UdpCommand.print(";");
   UdpCommand.endPacket();
 }
+//-------------------------------------------------------------------------------------------------------
 
 void testClient(const char * host, uint16_t port)
 {
