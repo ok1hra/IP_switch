@@ -42,8 +42,8 @@ char  Listens = 'm' ;
             //  [s] IP switch slave * this device *
 //-------------------------------------------------------------------------------------------------------
 
-// #define ETHERNET                    // Enable ESP32 ethernet (DHCP IPv4)
-#define WIFI                     // Enable ESP32 WIFI (DHCP IPv4)
+#define ETHERNET                    // Enable ESP32 ethernet (DHCP IPv4)
+// #define WIFI                     // Enable ESP32 WIFI (DHCP IPv4)
 const int SERIAL_BAUDRATE = 115200; // serial debud baudrate
 int incomingByte = 0;   // for incoming serial data
 
