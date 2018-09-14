@@ -2,9 +2,9 @@
 
 IP Switch
 ----------------------
-https://remoteqth.com/
-2017-10 by OK1HRA
-rev 0.1
+https://remoteqth.com/wiki/index.php?page=IP+Switch+with+ESP32-GATEWAY
+2018-09 by OK1HRA
+rev 0.2
 
 ___               _        ___ _____ _  _
 | _ \___ _ __  ___| |_ ___ / _ \_   _| || |  __ ___ _ __
@@ -27,17 +27,28 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 Features:
 HARDWARE ESP32-GATEWAY
+
+Changelog:
+2018-09 - add IP switch support
+        - blink LED after DHCP connect and receive sync packet
+2018-08 add Band decoder support
 */
 
-//-------------------------------------------------------------------------------------------------------
-byte RELAY_BOARD_ID      = 1;   // Unique ID number [0-F] hex format
-// #define HW_BCD_SW            // enable hardware ID board bcd switch
- #define ETHERNET               // Enable ESP32 ethernet (DHCP IPv4)
-//#define WIFI                  // Enable ESP32 WIFI (DHCP IPv4)
+// Receive UDP broadcast master device ID  --------------------------------------------------------------
+char  Listens = 'm' ;
+            //  [o] Open Interface 3
+            //  [d] Band decoder
+            //  [m] IP switch master
+            //  [s] IP switch slave * this device *
 //-------------------------------------------------------------------------------------------------------
 
-const char* ssid     = "";
-const char* password = "";
+// #define ETHERNET                    // Enable ESP32 ethernet (DHCP IPv4)
+#define WIFI                     // Enable ESP32 WIFI (DHCP IPv4)
+const int SERIAL_BAUDRATE = 115200; // serial debud baudrate
+int incomingByte = 0;   // for incoming serial data
+
+// const char* ssid     = "";
+// const char* password = "";
 #define HTTP_SERVER_PORT  80    // Web server port
 #define INCOMING_UDP_PORT 88    // command:
 #define ShiftOut                // Enable ShiftOut register
@@ -45,6 +56,8 @@ const char* password = "";
 #define SERIAL_DEBUG            // Enable serial debug [115200 baud]
 int BroadcastPort       = 88;   // destination broadcast packet port
 
+#define HW_BCD_SW                   // enable hardware ID board bcd switch (disable if not installed)
+byte RELAY_BOARD_ID        = 0x00;  // Unique ID number [0-F] hex format,
 #if defined(ShiftOut)
   const int ShiftOutDataPin = 17;
   const int ShiftOutLatchPin = 16;
@@ -52,10 +65,8 @@ int BroadcastPort       = 88;   // destination broadcast packet port
   byte ShiftOutByte[3];
 #endif
 
-const int BCD[4] = {34, 33, 32, 10};
+const int BCD[4] = {34, 33, 32, 10};  // BCD encoder PINs
 
-// const int LED1 =  33;      // the number of the LED pin
-// boolean LED1status = false;
 int i = 0;
 #include <WiFi.h>
 #include <WiFiUdp.h>
@@ -71,7 +82,7 @@ WiFiUDP UdpCommand;
 uint8_t buffer[50] = "";
 char packetBuffer[50];
 int UDPpacketSize;
-byte TxUdpBuffer[] = { B01110011, B00111010, 0, 0, 0, B00111011}; // s, :, Bank0, Bank1, Bank2, ;
+byte TxUdpBuffer[] = { Listens, B00111010, 0, 0, 0, B00111011}; // s, :, Bank0, Bank1, Bank2, ;
 #include <ETH.h>
 static bool eth_connected = false;
 IPAddress BroadcastIP(0, 0, 0, 0);   // Broadcast IP address// #endif
@@ -79,10 +90,6 @@ IPAddress BroadcastIP(0, 0, 0, 0);   // Broadcast IP address// #endif
 //-------------------------------------------------------------------------------------------------------
 
 void setup() {
-  // for (i = 0; i < 6; i++) {
-  //   pinMode(GPIOS[i], OUTPUT);
-  // }
-  // pinMode(LED1, OUTPUT);
   #if defined(ShiftOut)
     pinMode(ShiftOutLatchPin, OUTPUT);
     pinMode(ShiftOutClockPin, OUTPUT);
@@ -95,18 +102,38 @@ void setup() {
 
   #if defined(HW_BCD_SW)
     GetBoardId();
+    pinMode(BCD[1], OUTPUT);  // LED
+    digitalWrite(BCD[1], LOW);
   #endif
 
   #if defined(SERIAL_DEBUG)
-    Serial.begin(115200);
+    Serial.begin(SERIAL_BAUDRATE);
     while(!Serial) {
       ; // wait for serial port to connect. Needed for native USB port only
     }
     Serial.println();
-    Serial.println("===================");
-    Serial.print("DEVICE ID: ");
-    Serial.println(RELAY_BOARD_ID, DEC);
-    Serial.println("===================");
+    Serial.println("===============================");
+    Serial.print("SLAVE DEVICE ID: ");
+    Serial.println(RELAY_BOARD_ID, HEX);
+    Serial.print("Listen MASTER: ");
+    if(Listens == 'o'){
+      Serial.println("Open Interface III");
+    }
+    if(Listens == 'd' ){
+      Serial.println("Band decoder MK2");
+    }
+    if(Listens == 'm' ){
+      Serial.println("IP switch master");
+    }
+    Serial.println("===============================");
+    Serial.println("You can change with send character:");
+    Serial.println("    m - IP switch master");
+    Serial.println("    d - Band decoder");
+    Serial.println("    o - Open Interface III");
+    Serial.print("Incoming UDP port: ");
+      Serial.println(INCOMING_UDP_PORT);
+    Serial.print("Broadcast port: ");
+      Serial.println(BroadcastPort);
     Serial.println();
   #endif
 
@@ -134,6 +161,13 @@ void setup() {
       Serial.print("WIFI dBm: ");
       Serial.println(WiFi.RSSI());
     #endif
+    digitalWrite(BCD[1], HIGH);
+    delay(100);
+    digitalWrite(BCD[1], LOW);
+    delay(100);
+    digitalWrite(BCD[1], HIGH);
+    delay(100);
+    digitalWrite(BCD[1], LOW);
   #endif
 
   #if defined(ETHERNET)
@@ -145,21 +179,31 @@ void setup() {
   #if defined(WIFI)
     SendBroadcastUdp();
   #endif
-
-  // SHIFT OUT - all OFF
-  #if defined(ShiftOut)
-    digitalWrite(ShiftOutLatchPin, LOW);  // after Latch LOW register ready to receive data
-    shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, B00000000);
-    shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, B00000000);
-    shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, B00000000);
-    digitalWrite(ShiftOutLatchPin, HIGH);    // after latch to HIGH data shows on output pins
-  #endif
 }
 //-------------------------------------------------------------------------------------------------------
 
 void loop() {
   http();
   RX_UDP();
+
+  if (Serial.available() > 0) {
+          incomingByte = Serial.read();
+
+          if(incomingByte==109){
+            Listens = 'm';
+            Serial.println("Now control from: IP switch master");
+          }else if(incomingByte==100){
+            Listens = 'd';
+            Serial.println("Now control from: Band decoder");
+          }else if(incomingByte==111){
+            Listens = 'o';
+            Serial.println("Now control from: Open Interface III");
+          }else{
+            Serial.print(" [");
+            Serial.write(incomingByte); //, DEC);
+            Serial.println("] unknown command");
+          }
+  }
 }
 
 // SUBROUTINES -------------------------------------------------------------------------------------------------------
@@ -210,7 +254,8 @@ void RX_UDP(){
     }
 
     // RX Bank0-2  r:###;
-    if (packetBuffer[0] == 's' && packetBuffer[1] == ':' && packetBuffer[2] != 'q'){
+    if ( (packetBuffer[0] == 's' || packetBuffer[0] == 'm')
+      && packetBuffer[1] == ':' && packetBuffer[2] != 'q'){
       if(packetBuffer[5] == ';'){
         ShiftOutByte[2] = packetBuffer[4];    // Bank2
         ShiftOutByte[1] = packetBuffer[3];    // Bank1
@@ -238,6 +283,7 @@ void RX_UDP(){
         TxUdpBuffer[4]=ShiftOutByte[2];
         UdpCommand.beginPacket(UdpCommand.remoteIP(), UdpCommand.remotePort());   // Send to IP and port from recived UDP command
           UdpCommand.write(TxUdpBuffer, sizeof(TxUdpBuffer));   // send buffer
+          // Serial.write(TxUdpBuffer, sizeof(TxUdpBuffer));   // send buffer
         UdpCommand.endPacket();
 
         #if defined(SERIAL_DEBUG)
@@ -245,29 +291,43 @@ void RX_UDP(){
           Serial.print(UdpCommand.remoteIP());
           Serial.print(":");
           Serial.print(UdpCommand.remotePort());
-          Serial.print("   ");
-          Serial.print("BankA: ");
+          Serial.print(" ");
+          // Serial.print("BankA: ");
           Serial.print(ShiftOutByte[0], BIN);
-          Serial.print(" BankB: ");
+          Serial.print(" | ");
           Serial.print(ShiftOutByte[1], BIN);
-          Serial.print(" BankC: ");
+          Serial.print(" | ");
           Serial.println(ShiftOutByte[2], BIN);
         #endif
       #endif
     }
 
-    // ANSWER TO OpenInterface or Controller querry Broadcast
-    if (packetBuffer[0] == 'b' && packetBuffer[1] == ':' && (packetBuffer[2] == 'o' || packetBuffer[2] == 'c') && packetBuffer[4] == ';'){
-      Serial.print("RX b:o#;");
-      Serial.print(UdpCommand.remoteIP());
-      Serial.print(":");
-      Serial.println(UdpCommand.remotePort());
+    // ANSWER TO querry Broadcast
+    if ( packetBuffer[0] == 'b'
+      && packetBuffer[1] == ':'
+      && packetBuffer[2] == Listens
+      && ( (Listens=='m' && String(packetBuffer[3]).toInt()==RELAY_BOARD_ID)
+        || (Listens=='d' && String(packetBuffer[3]).toInt()==RELAY_BOARD_ID)
+        || (Listens=='o') )
+      && packetBuffer[4] == ';'
+       ){
+
+      #if defined(SERIAL_DEBUG)
+        Serial.print("RX b:");
+        Serial.print(packetBuffer[2]);
+        Serial.print(String(packetBuffer[3]).toInt() );
+        // Serial.print("/");
+        // Serial.print(RELAY_BOARD_ID, HEX);
+        Serial.print(";");
+        Serial.print(UdpCommand.remoteIP());
+        Serial.print(":");
+        Serial.println(UdpCommand.remotePort());
+      #endif
+      digitalWrite(BCD[1], HIGH);
+      delay(100);
+      digitalWrite(BCD[1], LOW);
       SendBroadcastUdp();
     }
-
-    // RX LED INVERTED
-    // LED1status = !LED1status;
-    // digitalWrite(LED1, LED1status);
 
     memset(packetBuffer,0,sizeof(packetBuffer));    // clear array
   }
@@ -381,6 +441,14 @@ void EthEvent(WiFiEvent_t event)
       Serial.print(ETH.linkSpeed());
       Serial.println("Mbps");
       eth_connected = true;
+      digitalWrite(BCD[1], HIGH);
+      delay(100);
+      digitalWrite(BCD[1], LOW);
+      delay(100);
+      digitalWrite(BCD[1], HIGH);
+      delay(100);
+      digitalWrite(BCD[1], LOW);
+
       SendBroadcastUdp();
       break;
     case SYSTEM_EVENT_ETH_DISCONNECTED:
