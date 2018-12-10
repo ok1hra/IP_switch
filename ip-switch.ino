@@ -28,14 +28,20 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 Features:
 HARDWARE ESP32-GATEWAY
 
+#if defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__)
+#elif defined(__AVR_ATmega328P__)
+
 Changelog:
+2018-12 - web suport
 2018-09 - add IP switch support
         - blink LED after DHCP connect and receive sync packet
 2018-08 add Band decoder support
 */
 
 // Receive UDP broadcast master device ID  --------------------------------------------------------------
-char  Listens = 'm' ;
+const char* REV = "20181210";
+
+char  Listens = 'm' ;   // default, if eeprom not set/initialized
             //  [o] Open Interface 3
             //  [d] Band decoder
             //  [m] IP switch master
@@ -57,7 +63,7 @@ int incomingByte = 0;   // for incoming serial data
 int BroadcastPort       = 88;   // destination broadcast packet port
 
 #define HW_BCD_SW                   // enable hardware ID board bcd switch (disable if not installed)
-byte RELAY_BOARD_ID        = 0x00;  // Unique ID number [0-F] hex format,
+byte RELAY_BOARD_ID        = 0x00;  // Unique ID number [0-F] hex format - over BCD switch
 #if defined(ShiftOut)
   const int ShiftOutDataPin = 17;
   const int ShiftOutLatchPin = 16;
@@ -70,6 +76,8 @@ const int BCD[4] = {34, 33, 32, 10};  // BCD encoder PINs
 int i = 0;
 #include <WiFi.h>
 #include <WiFiUdp.h>
+#include "EEPROM.h"
+#define EEPROM_SIZE 1
 
 WiFiServer server(HTTP_SERVER_PORT);
 // Client variables
@@ -86,6 +94,7 @@ byte TxUdpBuffer[] = { Listens, B00111010, 0, 0, 0, B00111011}; // s, :, Bank0, 
 #include <ETH.h>
 static bool eth_connected = false;
 IPAddress BroadcastIP(0, 0, 0, 0);   // Broadcast IP address// #endif
+String HTTP_req;
 
 //-------------------------------------------------------------------------------------------------------
 
@@ -106,6 +115,18 @@ void setup() {
     digitalWrite(BCD[1], LOW);
   #endif
 
+  if (!EEPROM.begin(EEPROM_SIZE)){
+    #if defined(SERIAL_DEBUG)
+      Serial.println("failed to initialise EEPROM"); delay(1);
+    #endif
+  }
+  Listens = EEPROM.read(0);
+  if(Listens=='o'||Listens=='d'||Listens=='m'){
+    // OK
+  }else{
+    Listens='m';
+  }
+
   #if defined(SERIAL_DEBUG)
     Serial.begin(SERIAL_BAUDRATE);
     while(!Serial) {
@@ -113,6 +134,8 @@ void setup() {
     }
     Serial.println();
     Serial.println("===============================");
+    Serial.print("Version: ");
+    Serial.println(REV);
     Serial.print("SLAVE DEVICE ID: ");
     Serial.println(RELAY_BOARD_ID, HEX);
     Serial.print("Listen MASTER: ");
@@ -130,11 +153,11 @@ void setup() {
     Serial.println("    m - IP switch master");
     Serial.println("    d - Band decoder");
     Serial.println("    o - Open Interface III");
+    Serial.println();
     Serial.print("Incoming UDP port: ");
       Serial.println(INCOMING_UDP_PORT);
     Serial.print("Broadcast port: ");
       Serial.println(BroadcastPort);
-    Serial.println();
   #endif
 
   #if defined(WIFI)
@@ -177,7 +200,7 @@ void setup() {
     server.begin();
     UdpCommand.begin(INCOMING_UDP_PORT);    // incoming udp port
   #if defined(WIFI)
-    SendBroadcastUdp();
+    SendBroadcastUdp(0);    // 0=broadcast, 1= direct to RX IP
   #endif
 }
 //-------------------------------------------------------------------------------------------------------
@@ -191,22 +214,101 @@ void loop() {
 
           if(incomingByte==109){
             Listens = 'm';
+            EEPROM.write(0, 'm'); // address, value
+            EEPROM.commit();
             Serial.println("Now control from: IP switch master");
+            SendBroadcastUdp(0);    // 0=broadcast, 1= direct to RX IP
           }else if(incomingByte==100){
             Listens = 'd';
+            EEPROM.write(0, 'd'); // address, value
+            EEPROM.commit();
             Serial.println("Now control from: Band decoder");
+            SendBroadcastUdp(0);    // 0=broadcast, 1= direct to RX IP
           }else if(incomingByte==111){
             Listens = 'o';
+            EEPROM.write(0, 'o'); // address, value
+            EEPROM.commit();
             Serial.println("Now control from: Open Interface III");
+            SendBroadcastUdp(0);    // 0=broadcast, 1= direct to RX IP
+          }else if(incomingByte==104){  // h
+
+            Serial.println("-----------------------");
+            #if defined(WIFI)
+              Serial.print("WIFI IP address: ");
+              Serial.print(WiFi.localIP());
+              Serial.print(" | dBm: ");
+              Serial.println(WiFi.RSSI());
+            #else
+              Serial.println("WIFI OFF");
+            #endif
+
+            #if defined(ETHERNET)
+              Serial.print("ETH  MAC: ");
+              Serial.print(ETH.macAddress());
+              Serial.println("===============================");
+              Serial.print(", IPv4: ");
+              Serial.println(ETH.localIP());
+              Serial.println("===============================");
+              if (ETH.fullDuplex()) {
+                Serial.print("FULL_DUPLEX, ");
+              }
+              Serial.print(ETH.linkSpeed());
+              Serial.println("Mbps");
+            #else
+              Serial.println("ETHERNET OFF");
+            #endif
+            Serial.println("-----------------------");
+
           }else{
             Serial.print(" [");
             Serial.write(incomingByte); //, DEC);
             Serial.println("] unknown command");
           }
   }
+
+  // Demo();
 }
 
 // SUBROUTINES -------------------------------------------------------------------------------------------------------
+
+void Demo(){
+  ShiftOutByte[0]=0;
+  ShiftOutByte[1]=0;
+  ShiftOutByte[2]=0;
+
+  for (i = 0; i < 8; i++) {
+    bitSet(ShiftOutByte[0], i);
+      digitalWrite(ShiftOutLatchPin, LOW);  // když dáme latchPin na LOW mužeme do registru poslat data
+      shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[2]);
+      shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[1]);
+      shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[0]);
+      digitalWrite(ShiftOutLatchPin, HIGH);    // jakmile dáme latchPin na HIGH data se objeví na výstupu
+      delay(25);
+    bitClear(ShiftOutByte[2], i);
+  }
+  for (i = 0; i < 8; i++) {
+    bitSet(ShiftOutByte[1], i);
+      digitalWrite(ShiftOutLatchPin, LOW);  // když dáme latchPin na LOW mužeme do registru poslat data
+      shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[2]);
+      shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[1]);
+      shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[0]);
+      digitalWrite(ShiftOutLatchPin, HIGH);    // jakmile dáme latchPin na HIGH data se objeví na výstupu
+      delay(25);
+    bitClear(ShiftOutByte[0], i);
+  }
+  for (i = 0; i < 8; i++) {
+    bitSet(ShiftOutByte[2], i);
+      digitalWrite(ShiftOutLatchPin, LOW);  // když dáme latchPin na LOW mužeme do registru poslat data
+      shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[2]);
+      shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[1]);
+      shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[0]);
+      digitalWrite(ShiftOutLatchPin, HIGH);    // jakmile dáme latchPin na HIGH data se objeví na výstupu
+      delay(25);
+    bitClear(ShiftOutByte[1], i);
+  }
+}
+
+
 // http://www.catonmat.net/blog/low-level-bit-hacks-you-absolutely-must-know/
 
 void GetBoardId(){
@@ -287,17 +389,28 @@ void RX_UDP(){
         UdpCommand.endPacket();
 
         #if defined(SERIAL_DEBUG)
+        // Serial.print("RX  packetBuffer[2] (Char) ");
+        // Serial.println(packetBuffer[2]);
+        // Serial.print("SET ShiftOutByte[0] (byte) ");
+        // Serial.println(ShiftOutByte[0]);
+        // Serial.print("TX  TxUdpBuffer[2]  (byte) ");
+        // Serial.println(TxUdpBuffer[2]);
           Serial.print("TX ");
           Serial.print(UdpCommand.remoteIP());
           Serial.print(":");
           Serial.print(UdpCommand.remotePort());
           Serial.print(" ");
           // Serial.print("BankA: ");
-          Serial.print(ShiftOutByte[0], BIN);
+          Serial.print(TxUdpBuffer[2], BIN);
           Serial.print(" | ");
-          Serial.print(ShiftOutByte[1], BIN);
+          Serial.print(TxUdpBuffer[3], BIN);
           Serial.print(" | ");
-          Serial.println(ShiftOutByte[2], BIN);
+          Serial.print(TxUdpBuffer[4], BIN);
+          #if defined(WIFI)
+            Serial.print(" | dBm: ");
+            Serial.print(WiFi.RSSI());
+          #endif
+          Serial.println();
         #endif
       #endif
     }
@@ -326,7 +439,7 @@ void RX_UDP(){
       digitalWrite(BCD[1], HIGH);
       delay(100);
       digitalWrite(BCD[1], LOW);
-      SendBroadcastUdp();
+      SendBroadcastUdp(1);    // 0=broadcast, 1= direct to RX IP
     }
 
     memset(packetBuffer,0,sizeof(packetBuffer));    // clear array
@@ -348,9 +461,10 @@ void http(){
     while (client.connected()) {
       if (client.available()) {
         char c = client.read();
-        #if defined(SERIAL_DEBUG)
-          Serial.write(c);
-        #endif
+        HTTP_req += c;
+        // #if defined(SERIAL_DEBUG)
+        //   Serial.write(c);
+        // #endif
         //read char by char HTTP request
         linebuf[charcount]=c;
         if (charcount<sizeof(linebuf)-1) charcount++;
@@ -359,35 +473,139 @@ void http(){
         // so you can send a reply
         if (c == '\n' && currentLineIsBlank) {
           // send a standard http response header
-          client.println("HTTP/1.1 200 OK");
-          client.println("Content-Type: text/html");
-          client.println("Connection: close");  // the connection will be closed after completion of the response
+
+          client.println(F("HTTP/1.1 200 OK"));
+          client.println(F("Content-Type: text/html"));
+          client.println(F("Connection: close"));
           client.println();
-          client.println("<!DOCTYPE HTML><html><head>");
-          client.println("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"></head>");
-          client.println("<h1>RemoteSwitch </h1>");
-          for (i = 0; i < 6; i++) {
-            client.println("<p>GPIO ");
-            // client.println(GPIOS[i]);
-            client.println(" <a href=\"h");
-            client.println(i);
-            client.println("\"><button>ON</button></a>&nbsp;<a href=\"l");
-            client.println(i);
-            client.println("\"><button>OFF</button></a></p>");
+          client.println(F("<!DOCTYPE html>"));
+          client.println(F("<html>"));
+          client.println(F("<head>"));
+          client.print(F("<title>"));
+          client.println(F("IP switch ID#"));
+          client.println(RELAY_BOARD_ID);
+          client.println(F("</title>"));
+          // client.print(F("<meta http-equiv=\"refresh\" content=\"10"));
+          client.print(F("<meta http-equiv=\"refresh\" content=\"10;url=http://"));
+          #if defined(ETHERNET)
+            client.print(ETH.localIP());
+          #endif
+          #if defined(WIFI)
+            client.print(WiFi.localIP());
+          #endif
+          client.println(F("\">"));
+          client.println(F("<link href='http://fonts.googleapis.com/css?family=Roboto+Condensed:300italic,400italic,700italic,400,700,300&subset=latin-ext' rel='stylesheet' type='text/css'>"));
+          client.println(F("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, user-scalable=no\">"));
+          client.println(F("<meta name=\"mobile-web-app-capable\" content=\"yes\">"));
+          client.println(F("<style type=\"text/css\">"));
+          client.println(F("body {font-family: 'Roboto Condensed',sans-serif,Arial,Tahoma,Verdana;background: #ccc;}"));
+          client.println(F("a:link  {color: #888;font-weight: bold;text-decoration: none;}"));
+          client.println(F("a:visited  {color: #888;font-weight: bold;text-decoration: none;}"));
+          client.println(F("a:hover  {color: #888;font-weight: bold;text-decoration: none;}"));
+          client.println(F("input {border: 2px solid #aaa;background: #ccc;margin: 10px 5px 0 0;-webkit-border-radius: 5px;-moz-border-radius: 5px;border-radius: 5px;color : #333;}"));
+          client.println(F("input:hover {border: 2px solid #080;}"));
+          client.println(F("input.g {background: #080;color: #fff;}"));
+          client.println(F("input.gr {background: #800;color: #fff;}"));
+          client.println(F(".box {border: 2px solid #080;background: #ccc;  line-height: 2; margin: 10px 5px 0 5px;padding: 1px 7px 1px 7px;-webkit-border-radius: 5px;-moz-border-radius: 5px;border-radius: 5px;color : #000;}"));
+          client.println(F(".boxr {border: 2px solid #800;background: #800; line-height: 2; margin: 10px 5px 0 5px;padding: 1px 7px 1px 7px;-webkit-border-radius: 5px;-moz-border-radius: 5px;border-radius: 5px;color : #fff;}"));
+          // client.println(F(".ptt {border: 2px solid #800;background: #ccc;margin: 10px 15px 0 10px;padding: 1px 7px 1px 7px;-webkit-border-radius: 5px;-moz-border-radius: 5px;border-radius: 5px;color : #800;}"));
+          client.println(F("</style></head><body>"));
+          String GETOUTPUT = HTTP_req.substring(7, 8);
+
+          //   // SetPin(GETOUTPUT.toInt(), !OutputPinStatus[GETOUTPUT.toInt()]);
+          //   ReversePin(GETOUTPUT.toInt());
+          if(GETOUTPUT.toInt()==1){
+            Listens='o';
+            EEPROM.write(0, 'o'); // address, value
+            EEPROM.commit();
+            SendBroadcastUdp(0);    // 0=broadcast, 1= direct to RX IP
           }
-          // client.println("<p>LED1 (gpio33) <a href=\"on1\"><button>ON</button></a>&nbsp;<a href=\"off1\"><button>OFF</button></a></p>");
-          // client.println("<p>GPIO 5 <a href=\"on2\"><button>ON</button></a>&nbsp;<a href=\"off2\"><button>OFF</button></a></p>");
-          client.print("Wifi: <b>");
-          client.print(ssid);
-          client.print("</b> ");
-          client.print(WiFi.RSSI());
-          client.print(" dBm, ");
-          client.print(WiFi.localIP());
-          client.print("</p><p>ETH: <b>");
-          client.print(ETH.macAddress());
-          client.print("</b>, ");
-          client.print(ETH.localIP());
-          client.println("</p></html>");
+          if(GETOUTPUT.toInt()==2){
+            Listens='d';
+            EEPROM.write(0, 'd'); // address, value
+            EEPROM.commit();
+            SendBroadcastUdp(0);    // 0=broadcast, 1= direct to RX IP
+          }
+          if(GETOUTPUT.toInt()==3){
+            Listens='m';
+            EEPROM.write(0, 'm'); // address, value
+            EEPROM.commit();
+            SendBroadcastUdp(0);    // 0=broadcast, 1= direct to RX IP
+          }
+
+          // client.println("<h1>RemoteSwitch </h1>");
+          client.println("<p>Output status<br>");
+          for (i = 0; i < 3; i++) {
+            client.print("Bank ");
+            client.print(i+1);
+            client.print(" ");
+            for (int j = 0; j < 8; j++) {
+              client.print("<span class=\"box");
+              if(bitRead(ShiftOutByte[i], j)==1){
+                client.print("r");
+              }
+              client.print("\">");
+              // client.print(bitRead(ShiftOutByte[i], j));
+              client.print(j+1);
+              client.println("</span>");
+            }
+            client.println("<br>");
+          }
+          client.println("</p>");
+
+          client.print("Wifi: ");
+          #if defined(WIFI)
+            client.print("<b>");
+            client.print(ssid);
+            client.print("</b> ");
+            client.print(WiFi.RSSI());
+            client.print(" dBm, ");
+            client.print(WiFi.localIP());
+          #else
+            client.print("OFF");
+          #endif
+
+          client.print(" | ETH: ");
+          #if defined(ETHERNET)
+            client.print(ETH.macAddress());
+            client.print(", ");
+            client.print(ETH.localIP());
+          #else
+            client.print("OFF");
+          #endif
+
+          client.print(F(" | Version: "));
+          client.println(F(REV));
+
+          client.println(F("<form method=\"get\">Source: "));
+          client.print("<input type=\"submit\" name=\"S1\" value=\"Open Interface III\" class=\"");
+          if(Listens == 'o'){
+            client.print("g");
+          }else{
+            client.print("r");
+          }
+          client.print("\"><input type=\"submit\" name=\"S2\" value=\"Band decoder MK2\" class=\"");
+          if(Listens == 'd'){
+            client.print("g");
+          }else{
+            client.print("r");
+          }
+          client.print("\"><input type=\"submit\" name=\"S3\" value=\"Manual IP switch\" class=\"");
+          if(Listens == 'm'){
+            client.print("g");
+          }else{
+            client.print("r");
+          }
+
+          // <input type="submit" name="S1" value="[ 1 ]" class="r">
+          client.println(F("\"></form><p><a href=\".\" onclick=\"window.open( this.href, this.href, 'width=400,height=180,left=0,top=0,menubar=no,location=no,status=no' ); return false;\" > split&#8599;</a></p>"));
+          client.println(F("</body></html>"));
+
+          #if defined(SERIAL_DEBUG)
+            Serial.print(HTTP_req);
+          #endif
+          HTTP_req = "";
+
           break;
         }
         if (c == '\n') {
@@ -431,13 +649,14 @@ void EthEvent(WiFiEvent_t event)
       break;
     case SYSTEM_EVENT_ETH_GOT_IP:
       Serial.print("ETH  MAC: ");
-      Serial.print(ETH.macAddress());
-      Serial.print(", IPv4: ");
-      Serial.print(ETH.localIP());
+      Serial.println(ETH.macAddress());
+      Serial.println("===============================");
+      Serial.print("   IPv4: ");
+      Serial.println(ETH.localIP());
+      Serial.println("===============================");
       if (ETH.fullDuplex()) {
-        Serial.print(", FULL_DUPLEX");
+        Serial.print("FULL_DUPLEX, ");
       }
-      Serial.print(", ");
       Serial.print(ETH.linkSpeed());
       Serial.println("Mbps");
       eth_connected = true;
@@ -448,8 +667,12 @@ void EthEvent(WiFiEvent_t event)
       digitalWrite(BCD[1], HIGH);
       delay(100);
       digitalWrite(BCD[1], LOW);
+      delay(100);
+      digitalWrite(BCD[1], HIGH);
+      delay(100);
+      digitalWrite(BCD[1], LOW);
 
-      SendBroadcastUdp();
+      SendBroadcastUdp(0);    // 0=broadcast, 1= direct to RX IP
       break;
     case SYSTEM_EVENT_ETH_DISCONNECTED:
       Serial.println("ETH  Disconnected");
@@ -465,21 +688,38 @@ void EthEvent(WiFiEvent_t event)
 }
 //-------------------------------------------------------------------------------------------------------
 
-void SendBroadcastUdp(){
-  BroadcastIP = ~ETH.subnetMask() | ETH.gatewayIP();
-  Serial.print("TX UDP broadcast packet [b:s");
-  Serial.print(RELAY_BOARD_ID, HEX);
-  Serial.print(";] to ");
-  Serial.print(BroadcastIP);
-  Serial.print(":");
-  Serial.println(BroadcastPort);
+void SendBroadcastUdp(bool DIRECT){
+  if(DIRECT==0){
+    BroadcastIP = ~ETH.subnetMask() | ETH.gatewayIP();
+    Serial.print("TX UDP broadcast packet [b:s");
+    Serial.print(RELAY_BOARD_ID, HEX);
+    Serial.print(";] to ");
+    Serial.print(BroadcastIP);
+    Serial.print(":");
+    Serial.println(BroadcastPort);
 
-  UdpCommand.beginPacket(BroadcastIP, BroadcastPort);   // Send to IP and port from recived UDP command
-  // UdpCommand.beginMulticast(UdpCommand.BroadcastIP(), BroadcastPort, ETH.localIP()).
-    UdpCommand.print("b:s");
-    UdpCommand.print(RELAY_BOARD_ID, HEX);
-    UdpCommand.print(";");
-  UdpCommand.endPacket();
+    UdpCommand.beginPacket(BroadcastIP, BroadcastPort);   // Send to IP and port from recived UDP command
+    // UdpCommand.beginMulticast(UdpCommand.BroadcastIP(), BroadcastPort, ETH.localIP()).
+      UdpCommand.print("b:s");
+      UdpCommand.print(RELAY_BOARD_ID, HEX);
+      UdpCommand.print(";");
+    UdpCommand.endPacket();
+
+  // DIRECT
+  }else{
+    Serial.print("TX UDP direct packet [b:s");
+    Serial.print(RELAY_BOARD_ID, HEX);
+    Serial.print(";] to ");
+    Serial.print(UdpCommand.remoteIP());
+    Serial.print(":");
+    Serial.println(UdpCommand.remotePort());
+
+    UdpCommand.beginPacket(UdpCommand.remoteIP(), UdpCommand.remotePort());   // Send to IP and port from recived UDP command
+      UdpCommand.print("b:s");
+      UdpCommand.print(RELAY_BOARD_ID, HEX);
+      UdpCommand.print(";");
+    UdpCommand.endPacket();
+  }
 }
 //-------------------------------------------------------------------------------------------------------
 
