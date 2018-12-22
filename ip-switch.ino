@@ -3,8 +3,6 @@
 IP Switch
 ----------------------
 https://remoteqth.com/wiki/index.php?page=IP+Switch+with+ESP32-GATEWAY
-2018-09 by OK1HRA
-rev 0.2
 
 ___               _        ___ _____ _  _
 | _ \___ _ __  ___| |_ ___ / _ \_   _| || |  __ ___ _ __
@@ -25,21 +23,18 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-Features:
 HARDWARE ESP32-GATEWAY
-
-#if defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__)
-#elif defined(__AVR_ATmega328P__)
 
 Changelog:
 2018-12 - web suport
+        - add OTA
 2018-09 - add IP switch support
         - blink LED after DHCP connect and receive sync packet
 2018-08 add Band decoder support
 */
 
 // Receive UDP broadcast master device ID  --------------------------------------------------------------
-const char* REV = "20181210";
+const char* REV = "20181222";
 
 char  Listens = 'm' ;   // default, if eeprom not set/initialized
             //  [o] Open Interface 3
@@ -49,12 +44,13 @@ char  Listens = 'm' ;   // default, if eeprom not set/initialized
 //-------------------------------------------------------------------------------------------------------
 
 #define ETHERNET                    // Enable ESP32 ethernet (DHCP IPv4)
-// #define WIFI                     // Enable ESP32 WIFI (DHCP IPv4)
+// #define WIFI                          // Enable ESP32 WIFI (DHCP IPv4)
+#define EnableOTA                     // Enable ESP32 WIFI (DHCP IPv4)
 const int SERIAL_BAUDRATE = 115200; // serial debud baudrate
 int incomingByte = 0;   // for incoming serial data
 
-// const char* ssid     = "";
-// const char* password = "";
+const char* ssid     = "";
+const char* password = "";
 #define HTTP_SERVER_PORT  80    // Web server port
 #define INCOMING_UDP_PORT 88    // command:
 #define ShiftOut                // Enable ShiftOut register
@@ -95,7 +91,10 @@ byte TxUdpBuffer[] = { Listens, B00111010, 0, 0, 0, B00111011}; // s, :, Bank0, 
 static bool eth_connected = false;
 IPAddress BroadcastIP(0, 0, 0, 0);   // Broadcast IP address// #endif
 String HTTP_req;
-
+#if defined(EnableOTA)
+  #include <ESPmDNS.h>
+  #include <ArduinoOTA.h>
+#endif
 //-------------------------------------------------------------------------------------------------------
 
 void setup() {
@@ -153,6 +152,7 @@ void setup() {
     Serial.println("    m - IP switch master");
     Serial.println("    d - Band decoder");
     Serial.println("    o - Open Interface III");
+    Serial.println("or 'h' for info");
     Serial.println();
     Serial.print("Incoming UDP port: ");
       Serial.println(INCOMING_UDP_PORT);
@@ -202,12 +202,59 @@ void setup() {
   #if defined(WIFI)
     SendBroadcastUdp(0);    // 0=broadcast, 1= direct to RX IP
   #endif
+
+  #if defined(EnableOTA)
+    // Port defaults to 3232
+    // ArduinoOTA.setPort(3232);
+    // Hostname defaults to esp3232-[MAC]
+
+    String StringHostname = "IP-relayID-"+String(RELAY_BOARD_ID, HEX);
+    char copy[13];
+    StringHostname.toCharArray(copy, 13);
+
+    ArduinoOTA.setHostname(copy);
+    ArduinoOTA.setPassword("remoteqth");
+    // $ echo password | md5sum
+    // ArduinoOTA.setPasswordHash("5587ba7a03b12a409ee5830cea97e079");
+    ArduinoOTA
+      .onStart([]() {
+        String type;
+        if (ArduinoOTA.getCommand() == U_FLASH)
+          type = "sketch";
+        else // U_SPIFFS
+          type = "filesystem";
+
+        // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
+        Serial.println("Start updating " + type);
+      })
+      .onEnd([]() {
+        Serial.println("\nEnd");
+      })
+      .onProgress([](unsigned int progress, unsigned int total) {
+        Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+      })
+      .onError([](ota_error_t error) {
+        Serial.printf("Error[%u]: ", error);
+        if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
+        else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
+        else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
+        else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
+        else if (error == OTA_END_ERROR) Serial.println("End Failed");
+      });
+
+    ArduinoOTA.begin();
+  #endif
 }
 //-------------------------------------------------------------------------------------------------------
 
 void loop() {
   http();
   RX_UDP();
+
+  #if defined(EnableOTA)
+   ArduinoOTA.handle();
+  #endif
+
 
   if (Serial.available() > 0) {
           incomingByte = Serial.read();
@@ -233,6 +280,12 @@ void loop() {
           }else if(incomingByte==104){  // h
 
             Serial.println("-----------------------");
+            Serial.print("Version: ");
+            Serial.println(REV);
+            Serial.print("SLAVE DEVICE ID: ");
+            Serial.println(RELAY_BOARD_ID, HEX);
+            Serial.print("Listen MASTER: ");
+            Serial.println(Listens);
             #if defined(WIFI)
               Serial.print("WIFI IP address: ");
               Serial.print(WiFi.localIP());
@@ -245,12 +298,10 @@ void loop() {
             #if defined(ETHERNET)
               Serial.print("ETH  MAC: ");
               Serial.print(ETH.macAddress());
-              Serial.println("===============================");
               Serial.print(", IPv4: ");
-              Serial.println(ETH.localIP());
-              Serial.println("===============================");
+              Serial.print(ETH.localIP());
               if (ETH.fullDuplex()) {
-                Serial.print("FULL_DUPLEX, ");
+                Serial.print(", FULL_DUPLEX, ");
               }
               Serial.print(ETH.linkSpeed());
               Serial.println("Mbps");
@@ -356,7 +407,8 @@ void RX_UDP(){
     }
 
     // RX Bank0-2  r:###;
-    if ( (packetBuffer[0] == 's' || packetBuffer[0] == 'm')
+    // if ( (packetBuffer[0] == 's' || packetBuffer[0] == 'm')
+    if ( (packetBuffer[0] == Listens)
       && packetBuffer[1] == ':' && packetBuffer[2] != 'q'){
       if(packetBuffer[5] == ';'){
         ShiftOutByte[2] = packetBuffer[4];    // Bank2
@@ -692,6 +744,7 @@ void SendBroadcastUdp(bool DIRECT){
   if(DIRECT==0){
     BroadcastIP = ~ETH.subnetMask() | ETH.gatewayIP();
     Serial.print("TX UDP broadcast packet [b:s");
+    Serial.print(Listens);
     Serial.print(RELAY_BOARD_ID, HEX);
     Serial.print(";] to ");
     Serial.print(BroadcastIP);
@@ -701,6 +754,7 @@ void SendBroadcastUdp(bool DIRECT){
     UdpCommand.beginPacket(BroadcastIP, BroadcastPort);   // Send to IP and port from recived UDP command
     // UdpCommand.beginMulticast(UdpCommand.BroadcastIP(), BroadcastPort, ETH.localIP()).
       UdpCommand.print("b:s");
+      UdpCommand.print(Listens);
       UdpCommand.print(RELAY_BOARD_ID, HEX);
       UdpCommand.print(";");
     UdpCommand.endPacket();
@@ -708,6 +762,7 @@ void SendBroadcastUdp(bool DIRECT){
   // DIRECT
   }else{
     Serial.print("TX UDP direct packet [b:s");
+    Serial.print(Listens);
     Serial.print(RELAY_BOARD_ID, HEX);
     Serial.print(";] to ");
     Serial.print(UdpCommand.remoteIP());
@@ -716,6 +771,7 @@ void SendBroadcastUdp(bool DIRECT){
 
     UdpCommand.beginPacket(UdpCommand.remoteIP(), UdpCommand.remotePort());   // Send to IP and port from recived UDP command
       UdpCommand.print("b:s");
+      UdpCommand.print(Listens);
       UdpCommand.print(RELAY_BOARD_ID, HEX);
       UdpCommand.print(";");
     UdpCommand.endPacket();
