@@ -1,5 +1,5 @@
 # IP switch
-![LCD menu](https://www.remoteqth.com/img/wiki-ip-switch-esp32gateway-02.jpg)
+![LCD menu](https://remoteqth.com/img/wiki-ip-switch-esp32gateway-02.jpg)
 Based on [ESP32-GATEWAY](https://remoteqth.com/wiki/index.php?page=IP+Switch+with+ESP32-GATEWAY)
 
 ## Controled from

@@ -23,9 +23,16 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+Send test packet
+  echo -n -e '\x00ms:bro;' | nc -u -w1 192.168.1.23 88 | hexdump -C
+Remote USB access
+  screen /dev/ttyUSB0 115200
+
 HARDWARE ESP32-GATEWAY
 
 Changelog:
+2019-01 - add CLI
+        - redesign UDP communications
 2018-12 - web suport
         - add OTA
 2018-09 - add IP switch support
@@ -34,32 +41,35 @@ Changelog:
 */
 
 // Receive UDP broadcast master device ID  --------------------------------------------------------------
-const char* REV = "20181222";
+const char* REV = "20190107";
 
-char  Listens = 'm' ;   // default, if eeprom not set/initialized
             //  [o] Open Interface 3
-            //  [d] Band decoder
+            //  [r] Band decoder
             //  [m] IP switch master
             //  [s] IP switch slave * this device *
 //-------------------------------------------------------------------------------------------------------
 
 #define ETHERNET                    // Enable ESP32 ethernet (DHCP IPv4)
 // #define WIFI                          // Enable ESP32 WIFI (DHCP IPv4)
-#define EnableOTA                     // Enable ESP32 WIFI (DHCP IPv4)
-const int SERIAL_BAUDRATE = 115200; // serial debud baudrate
-int incomingByte = 0;   // for incoming serial data
+// const char* ssid     = "";
+// const char* password = "";
 
-const char* ssid     = "";
-const char* password = "";
+//-------------------------------------------------------------------------------------------------------
+
+// #define HW_BCD_SW                   // enable hardware ID board bcd switch (disable if not installed)
+byte NET_ID        = 0x00;  // Unique ID number [0-F] hex format - over BCD switch
+bool EnableSerialDebug     = 0;
+
+// #define EnableOTA                     // Enable flashing ESP32 Over The Air
+
 #define HTTP_SERVER_PORT  80    // Web server port
 #define INCOMING_UDP_PORT 88    // command:
 #define ShiftOut                // Enable ShiftOut register
 #define UdpAnswer               // Send UDP answer confirm packet
-#define SERIAL_DEBUG            // Enable serial debug [115200 baud]
 int BroadcastPort       = 88;   // destination broadcast packet port
 
-#define HW_BCD_SW                   // enable hardware ID board bcd switch (disable if not installed)
-byte RELAY_BOARD_ID        = 0x00;  // Unique ID number [0-F] hex format - over BCD switch
+const int SERIAL_BAUDRATE = 115200; // serial debud baudrate
+int incomingByte = 0;   // for incoming serial data
 #if defined(ShiftOut)
   const int ShiftOutDataPin = 17;
   const int ShiftOutLatchPin = 16;
@@ -73,7 +83,7 @@ int i = 0;
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include "EEPROM.h"
-#define EEPROM_SIZE 1
+#define EEPROM_SIZE 2   // 1-listen source, 2-net ID
 
 WiFiServer server(HTTP_SERVER_PORT);
 // Client variables
@@ -84,12 +94,12 @@ boolean connected = false;
 //The udp library class
 WiFiUDP UdpCommand;
 uint8_t buffer[50] = "";
-char packetBuffer[50];
+char packetBuffer[10];
 int UDPpacketSize;
-byte TxUdpBuffer[] = { Listens, B00111010, 0, 0, 0, B00111011}; // s, :, Bank0, Bank1, Bank2, ;
+byte TxUdpBuffer[8];
 #include <ETH.h>
 static bool eth_connected = false;
-IPAddress BroadcastIP(0, 0, 0, 0);   // Broadcast IP address// #endif
+IPAddress RemoteSwIP(0, 0, 0, 0);         // remote UDP IP switch - set from UDP DetectRemote array
 String HTTP_req;
 #if defined(EnableOTA)
   #include <ESPmDNS.h>
@@ -108,82 +118,92 @@ void setup() {
    pinMode(BCD[i], INPUT);
   }
 
+  // Listen source
+  if (!EEPROM.begin(EEPROM_SIZE)){
+    if(EnableSerialDebug==1){
+      Serial.println("failed to initialise EEPROM"); delay(1);
+    }
+  }
+  TxUdpBuffer[2] = EEPROM.read(0);
+  if(TxUdpBuffer[2]=='o'||TxUdpBuffer[2]=='r'||TxUdpBuffer[2]=='m'){
+    // OK
+  }else{
+    TxUdpBuffer[2]='m';
+  }
+
   #if defined(HW_BCD_SW)
     GetBoardId();
     pinMode(BCD[1], OUTPUT);  // LED
     digitalWrite(BCD[1], LOW);
+  #else
+      NET_ID = EEPROM.read(1);
+      if(NET_ID > 0x0f){
+        NET_ID=0;
+      }
+      pinMode(BCD[1], OUTPUT);  // LED
+      digitalWrite(BCD[1], LOW);
   #endif
 
-  if (!EEPROM.begin(EEPROM_SIZE)){
-    #if defined(SERIAL_DEBUG)
-      Serial.println("failed to initialise EEPROM"); delay(1);
-    #endif
-  }
-  Listens = EEPROM.read(0);
-  if(Listens=='o'||Listens=='d'||Listens=='m'){
-    // OK
-  }else{
-    Listens='m';
-  }
-
-  #if defined(SERIAL_DEBUG)
+  // if(EnableSerialDebug==1){
     Serial.begin(SERIAL_BAUDRATE);
     while(!Serial) {
       ; // wait for serial port to connect. Needed for native USB port only
     }
     Serial.println();
-    Serial.println("===============================");
     Serial.print("Version: ");
     Serial.println(REV);
-    Serial.print("SLAVE DEVICE ID: ");
-    Serial.println(RELAY_BOARD_ID, HEX);
+    Serial.println("===============================");
+    Serial.print("SLAVE DEVICE NET-ID: 0x0");
+    Serial.println(NET_ID, HEX);
     Serial.print("Listen MASTER: ");
-    if(Listens == 'o'){
+    if(TxUdpBuffer[2] == 'o'){
       Serial.println("Open Interface III");
     }
-    if(Listens == 'd' ){
+    if(TxUdpBuffer[2] == 'r' ){
       Serial.println("Band decoder MK2");
     }
-    if(Listens == 'm' ){
+    if(TxUdpBuffer[2] == 'm' ){
       Serial.println("IP switch master");
     }
     Serial.println("===============================");
     Serial.println("You can change with send character:");
     Serial.println("    m - IP switch master");
-    Serial.println("    d - Band decoder");
+    Serial.println("    r - Band decoder");
     Serial.println("    o - Open Interface III");
-    Serial.println("or 'h' for info");
+    Serial.println("or '?' for info");
+    Serial.println("   '*' serial debug on/off");
+    Serial.println("   0-f network ID [hex]");
     Serial.println();
     Serial.print("Incoming UDP port: ");
       Serial.println(INCOMING_UDP_PORT);
     Serial.print("Broadcast port: ");
       Serial.println(BroadcastPort);
-  #endif
+  // }
 
   #if defined(WIFI)
-    #if defined(SERIAL_DEBUG)
+    if(EnableSerialDebug==1){
       Serial.print("WIFI Connecting to ");
       Serial.print(ssid);
-    #endif
+    }
     WiFi.begin(ssid, password);
     // attempt to connect to Wifi network:
     while(WiFi.status() != WL_CONNECTED) {
       // Connect to WPA/WPA2 network. Change this line if using open or WEP network:
       delay(500);
-      #if defined(SERIAL_DEBUG)
+      if(EnableSerialDebug==1){
         Serial.print(".");
-      #endif
+      }
     }
     // LED1status = !LED1status;
     // digitalWrite(LED1, LED1status);           // signalize wifi connected
-    #if defined(SERIAL_DEBUG)
+    if(EnableSerialDebug==1){
       Serial.println("");
       Serial.println("WIFI connected");
       Serial.print("WIFI IP address: ");
       Serial.println(WiFi.localIP());
       Serial.print("WIFI dBm: ");
       Serial.println(WiFi.RSSI());
-    #endif
+    }
     digitalWrite(BCD[1], HIGH);
     delay(100);
     digitalWrite(BCD[1], LOW);
@@ -200,7 +220,7 @@ void setup() {
     server.begin();
     UdpCommand.begin(INCOMING_UDP_PORT);    // incoming udp port
   #if defined(WIFI)
-    SendBroadcastUdp(0);    // 0=broadcast, 1= direct to RX IP
+    TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
   #endif
 
   #if defined(EnableOTA)
@@ -208,12 +228,12 @@ void setup() {
     // ArduinoOTA.setPort(3232);
     // Hostname defaults to esp3232-[MAC]
 
-    String StringHostname = "IP-relayID-"+String(RELAY_BOARD_ID, HEX);
+    String StringHostname = "IP-relayID-"+String(NET_ID, HEX);
     char copy[13];
     StringHostname.toCharArray(copy, 13);
 
     ArduinoOTA.setHostname(copy);
-    ArduinoOTA.setPassword("remoteqth");
+    // ArduinoOTA.setPassword("remoteqth");
     // $ echo password | md5sum
     // ArduinoOTA.setPasswordHash("5587ba7a03b12a409ee5830cea97e079");
     ArduinoOTA
@@ -245,70 +265,155 @@ void setup() {
     ArduinoOTA.begin();
   #endif
 }
+
 //-------------------------------------------------------------------------------------------------------
 
 void loop() {
   http();
   RX_UDP();
+  SerialCLI();
 
   #if defined(EnableOTA)
    ArduinoOTA.handle();
   #endif
 
+  // Demo();
+}
 
+// SUBROUTINES -------------------------------------------------------------------------------------------------------
+
+void SerialCLI(){
   if (Serial.available() > 0) {
           incomingByte = Serial.read();
 
+          // m
           if(incomingByte==109){
-            Listens = 'm';
+            TxUdpBuffer[2] = 'm';
             EEPROM.write(0, 'm'); // address, value
             EEPROM.commit();
             Serial.println("Now control from: IP switch master");
-            SendBroadcastUdp(0);    // 0=broadcast, 1= direct to RX IP
-          }else if(incomingByte==100){
-            Listens = 'd';
-            EEPROM.write(0, 'd'); // address, value
+            if(EnableSerialDebug==1){
+              Serial.print("EEPROM read [");
+              Serial.print(EEPROM.read(0));
+              Serial.println("]");
+            }
+            TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
+          // r
+          }else if(incomingByte==114){
+            TxUdpBuffer[2] = 'r';
+            EEPROM.write(0, 'r'); // address, value
             EEPROM.commit();
             Serial.println("Now control from: Band decoder");
-            SendBroadcastUdp(0);    // 0=broadcast, 1= direct to RX IP
+            if(EnableSerialDebug==1){
+              Serial.print("EEPROM read [");
+              Serial.print(EEPROM.read(0));
+              Serial.println("]");
+            }
+            TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
+
+          // o
           }else if(incomingByte==111){
-            Listens = 'o';
+            TxUdpBuffer[2] = 'o';
             EEPROM.write(0, 'o'); // address, value
             EEPROM.commit();
             Serial.println("Now control from: Open Interface III");
-            SendBroadcastUdp(0);    // 0=broadcast, 1= direct to RX IP
-          }else if(incomingByte==104){  // h
+            if(EnableSerialDebug==1){
+              Serial.print("EEPROM read [");
+              Serial.print(EEPROM.read(0));
+              Serial.println("]");
+            }
+            TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
 
-            Serial.println("-----------------------");
-            Serial.print("Version: ");
-            Serial.println(REV);
-            Serial.print("SLAVE DEVICE ID: ");
-            Serial.println(RELAY_BOARD_ID, HEX);
-            Serial.print("Listen MASTER: ");
-            Serial.println(Listens);
+          // *
+          }else if(incomingByte==42){
+            EnableSerialDebug=!EnableSerialDebug;
+            Serial.print("** Serial DEBUG ");
+            if(EnableSerialDebug==true){
+              Serial.println("ENABLE **");
+            }else{
+              Serial.println("DISABLE **");
+            }
+
+          // 0-9 a-f
+        }else if( (incomingByte>=48 && incomingByte<=57) || (incomingByte>=97 && incomingByte<=102) ){
+          if(incomingByte>=48 && incomingByte<=57){
+            NET_ID = incomingByte-48;
+          }else if(incomingByte>=97 && incomingByte<=102){
+            NET_ID = incomingByte-87;
+          }
+          EEPROM.write(1, NET_ID); // address, value
+          EEPROM.commit();
+          Serial.print("** Now NET-ID change to 0x0");
+          Serial.print(NET_ID, HEX);
+          Serial.println(" **");
+          if(EnableSerialDebug==1){
+            Serial.print("EEPROM read [");
+            Serial.print(EEPROM.read(1));
+            Serial.println("]");
+          }
+          TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
+
+          // ?
+        }else if(incomingByte==63){
+
+            Serial.println();
+            #if defined(ETHERNET)
+              Serial.println("  =================================");
+              Serial.print("     http://");
+              Serial.println(ETH.localIP());
+              Serial.println("  =================================");
+              Serial.print("  ETH  MAC: ");
+              Serial.println(ETH.macAddress());
+              Serial.print("  ");
+              Serial.print(ETH.linkSpeed());
+              Serial.print("Mbps");
+              if (ETH.fullDuplex()) {
+                Serial.print(", FULL_DUPLEX ");
+              }
+              Serial.println();
+            #else
+              Serial.println("  ETHERNET OFF");
+            #endif
             #if defined(WIFI)
-              Serial.print("WIFI IP address: ");
-              Serial.print(WiFi.localIP());
-              Serial.print(" | dBm: ");
+              Serial.println("  =================================");
+              Serial.print("    http://");
+              Serial.println(WiFi.localIP());
+              Serial.println("  =================================");
+              Serial.print("  dBm: ");
               Serial.println(WiFi.RSSI());
             #else
-              Serial.println("WIFI OFF");
+              Serial.println("  WIFI OFF");
             #endif
+            Serial.print("  Device NET-ID: 0x0");
+            Serial.println(NET_ID, HEX);
+            Serial.print("  Listen master: ");
+            Serial.println(char(TxUdpBuffer[2]));
+            Serial.print("  Master IP: ");
+            Serial.print(UdpCommand.remoteIP());
+            Serial.print(":");
+            Serial.println(UdpCommand.remotePort());
+            Serial.print("  Uptime: ");
+            Serial.print(millis()/1000);
+            Serial.println(" second");
+            Serial.print("  Version: ");
+            Serial.println(REV);
 
-            #if defined(ETHERNET)
-              Serial.print("ETH  MAC: ");
-              Serial.print(ETH.macAddress());
-              Serial.print(", IPv4: ");
-              Serial.print(ETH.localIP());
-              if (ETH.fullDuplex()) {
-                Serial.print(", FULL_DUPLEX, ");
-              }
-              Serial.print(ETH.linkSpeed());
-              Serial.println("Mbps");
-            #else
-              Serial.println("ETHERNET OFF");
-            #endif
-            Serial.println("-----------------------");
+
+            Serial.print("  Serial debug: ");
+            if(EnableSerialDebug==true){
+              Serial.println("ENABLE");
+            }else{
+              Serial.println("DISABLE");
+            }
+            Serial.println("---------------------------------------------");
+            Serial.println("  You can change source, with send character:");
+            Serial.println("      m - IP switch master");
+            Serial.println("      r - Band decoder");
+            Serial.println("      o - Open Interface III");
+            Serial.println("  or '?' for info");
+            Serial.println("     '*' serial debug on/off");
+            Serial.println("     0-f network ID [hex]");
+            Serial.println("---------------------------------------------");
 
           }else{
             Serial.print(" [");
@@ -316,11 +421,9 @@ void loop() {
             Serial.println("] unknown command");
           }
   }
-
-  // Demo();
 }
 
-// SUBROUTINES -------------------------------------------------------------------------------------------------------
+//-------------------------------------------------------------------------------------------------------
 
 void Demo(){
   ShiftOutByte[0]=0;
@@ -361,29 +464,227 @@ void Demo(){
 
 
 // http://www.catonmat.net/blog/low-level-bit-hacks-you-absolutely-must-know/
+//-------------------------------------------------------------------------------------------------------
 
 void GetBoardId(){
-  RELAY_BOARD_ID = 0;
+  NET_ID = 0;
   if(digitalRead(BCD[0])==0){
-    RELAY_BOARD_ID = RELAY_BOARD_ID | (1<<0);    // Set the n-th bit
+    NET_ID = NET_ID | (1<<0);    // Set the n-th bit
   }
   if(digitalRead(BCD[1])==0){
-    RELAY_BOARD_ID = RELAY_BOARD_ID | (1<<1);    // Set the n-th bit
+    NET_ID = NET_ID | (1<<1);    // Set the n-th bit
   }
   if(digitalRead(BCD[2])==0){
-    RELAY_BOARD_ID = RELAY_BOARD_ID | (1<<2);    // Set the n-th bit
+    NET_ID = NET_ID | (1<<2);    // Set the n-th bit
   }
   if(digitalRead(BCD[3])==0){
-    RELAY_BOARD_ID = RELAY_BOARD_ID | (1<<3);    // Set the n-th bit
+    NET_ID = NET_ID | (1<<3);    // Set the n-th bit
   }
 }
 //-------------------------------------------------------------------------------------------------------
+byte AsciiToHex(int ASCII){
+  if(ASCII>=48 && ASCII<=57){
+    return(ASCII-48);
+  }else if(ASCII>=97 && ASCII<=102){
+    return(ASCII-87);
+  }else{
+    return(255);
+  }
+}
+
+//-------------------------------------------------------------------------------------------------------
+/*
+ID FROM TO : BROADCAST ;
+ID FROM TO : CONFIRM ;
+ID FROM TO : A B C ;
+ID FROM TO : A B C ;
+
+TX  0ms:b;
+RX  0sm:c;
+TX  0ms:123;
+RX  0sm:123;
+*/
 
 void RX_UDP(){
   UDPpacketSize = UdpCommand.parsePacket();    // if there's data available, read a packet
   if (UDPpacketSize){
-    UdpCommand.read(packetBuffer, 50);      // read the packet into packetBufffer
+    UdpCommand.read(packetBuffer, 10);      // read the packet into packetBufffer
+    // Print RAW
+    // if(EnableSerialDebug==1){
+    //   Serial.print(F("RXraw ["));
+    //   for (int i = 0; i < 8; i++) {
+    //     Serial.print(packetBuffer[i]);
+    //   }
+    //   Serial.print(F("] "));
+    //   Serial.print(UdpCommand.remoteIP());
+    //   Serial.print(":");
+    //   Serial.print(UdpCommand.remotePort());
+    //   Serial.println();
+    // }
 
+    // ID-FROM-TO filter
+    if(String(packetBuffer[0], DEC).toInt()==NET_ID
+      && packetBuffer[1]==TxUdpBuffer[2]  // FROM Switch
+      && packetBuffer[2]== 's'  // TO
+      && packetBuffer[3]== ':'
+      && packetBuffer[7]== ';'
+    ){
+
+      // RX Broadcast / CFM
+      if((packetBuffer[4]== 'b' && packetBuffer[5]== 'r' && packetBuffer[6]== 'o')
+        || (packetBuffer[4]== 'c' && packetBuffer[5]== 'f' && packetBuffer[6]== 'm')
+        ){
+
+        if(EnableSerialDebug==1){
+          Serial.print(F("RX ["));
+          Serial.print(packetBuffer[0], HEX);
+          for(int i=1; i<8; i++){
+            Serial.print(char(packetBuffer[i]));
+          }
+          Serial.print(F("] "));
+          Serial.print(UdpCommand.remoteIP());
+          Serial.print(":");
+          Serial.println(UdpCommand.remotePort());
+        }
+        digitalWrite(BCD[1], HIGH);
+        delay(100);
+        digitalWrite(BCD[1], LOW);
+        if(packetBuffer[4]== 'b' && packetBuffer[5]== 'r' && packetBuffer[6]== 'o'){
+          TxUDP('s', packetBuffer[2], 'c', 'f', 'm', 1);    // 0=broadcast, 1= direct to RX IP
+        }
+
+      // RX DATA
+      }else{
+        ShiftOutByte[2] = String(packetBuffer[6], DEC).toInt();    // Bank2
+        ShiftOutByte[1] = String(packetBuffer[5], DEC).toInt();    // Bank1
+        ShiftOutByte[0] = String(packetBuffer[4], DEC).toInt();    // Bank0
+
+        // SHIFT OUT
+        #if defined(ShiftOut)
+          digitalWrite(ShiftOutLatchPin, LOW);  // když dáme latchPin na LOW mužeme do registru poslat data
+          shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[2]);
+          shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[1]);
+          shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[0]);
+          digitalWrite(ShiftOutLatchPin, HIGH);    // jakmile dáme latchPin na HIGH data se objeví na výstupu
+        #endif
+
+        if(EnableSerialDebug==1){
+          Serial.println();
+          Serial.print(F("RX ["));
+          Serial.print(packetBuffer[0], HEX);
+          for(int i=1; i<4; i++){
+            Serial.print(char(packetBuffer[i]));
+          }
+          Serial.print((byte)packetBuffer[4], BIN);
+          Serial.print(F("|"));
+          Serial.print((byte)packetBuffer[5], BIN);
+          Serial.print(F("|"));
+          Serial.print((byte)packetBuffer[6], BIN);
+          Serial.print(F(";] "));
+          Serial.print(UdpCommand.remoteIP());
+          Serial.print(F(":"));
+          Serial.println(UdpCommand.remotePort());
+
+        }
+        TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
+
+      }
+    } // filtered end
+    else{
+      if(EnableSerialDebug==1){
+        Serial.println(F("   Different NET-ID, or bad packet format"));
+      }
+    }
+    memset(packetBuffer, 0, sizeof(packetBuffer));   // Clear contents of Buffer
+  } //end IfUdpPacketSice
+}
+//-------------------------------------------------------------------------------------------------------
+
+void TxUDP(byte FROM, byte TO, byte A, byte B, byte C, bool DIRECT){
+
+  TxUdpBuffer[0] = NET_ID;
+  TxUdpBuffer[1] = FROM;
+  // TxUdpBuffer[2] = TO;
+  TxUdpBuffer[3] = B00111010;           // :
+  TxUdpBuffer[4] = A;
+  TxUdpBuffer[5] = B;
+  TxUdpBuffer[6] = C;
+  TxUdpBuffer[7] = B00111011;           // ;
+
+  // BROADCAST
+  if(A=='b' && B=='r' && C=='o'){  // b r o
+  // if(A==B01100010 && B==B01110010 && C==B01101111){  // b r o
+    // direct
+    if(DIRECT==0){
+      RemoteSwIP = ~ETH.subnetMask() | ETH.gatewayIP();
+      if(EnableSerialDebug==1){
+        Serial.print(F("TX broadcast ["));
+      }
+    }else{
+      if(EnableSerialDebug==1){
+        Serial.print(F("TX direct ["));
+      }
+      RemoteSwIP = UdpCommand.remoteIP();
+    }
+
+  // DATA
+  }else{
+    RemoteSwIP = UdpCommand.remoteIP();
+    if(EnableSerialDebug==1){
+      Serial.print(F("TX ["));
+    }
+  }
+
+  UdpCommand.beginPacket(RemoteSwIP, UdpCommand.remotePort());
+    UdpCommand.write(TxUdpBuffer, sizeof(TxUdpBuffer));   // send buffer
+  UdpCommand.endPacket();
+
+  if(EnableSerialDebug==1){
+    Serial.print(TxUdpBuffer[0], HEX);
+    for (int i=1; i<4; i++){
+      Serial.print(char(TxUdpBuffer[i]));
+    }
+    Serial.print(TxUdpBuffer[4], BIN);
+    Serial.print(F("|"));
+    Serial.print(TxUdpBuffer[5], BIN);
+    Serial.print(F("|"));
+    Serial.print(TxUdpBuffer[6], BIN);
+    Serial.print(char(TxUdpBuffer[7]));
+    Serial.print(F("] "));
+    Serial.print(RemoteSwIP);
+    Serial.print(F(":"));
+    Serial.print(UdpCommand.remotePort());
+    #if defined(WIFI)
+      Serial.print(" | dBm: ");
+      Serial.print(WiFi.RSSI());
+    #endif
+    Serial.println();
+  }
+
+}
+
+//---------------------------------------------
+/*
+void RX_UDP2(){
+  UDPpacketSize = UdpCommand.parsePacket();    // if there's data available, read a packet
+  if (UDPpacketSize){
+    UdpCommand.read(packetBuffer, 10);      // read the packet into packetBufffer
+
+    if(EnableSerialDebug==1){
+      Serial.print("RX: ");
+      for (i = 0; i < sizeof(packetBuffer); i++) {
+        Serial.print(packetBuffer[i]);
+        Serial.print("[");
+        Serial.print(packetBuffer[i], HEX);
+        Serial.print("/");
+        Serial.print(packetBuffer[i], BIN);
+        Serial.print("]");
+        // Serial.print("|");
+      }
+      Serial.println();
+    }
+
+    //------------------------------------------------------------------------
     // QUERY SWITCH value
     if (packetBuffer[0] == 's' && packetBuffer[1] == ':' && packetBuffer[2] == 'q' && packetBuffer[3] == ';'){
 
@@ -391,7 +692,7 @@ void RX_UDP(){
           UdpCommand.write(TxUdpBuffer, sizeof(TxUdpBuffer));   // send buffer
         UdpCommand.endPacket();
 
-        #if defined(SERIAL_DEBUG)
+        if(EnableSerialDebug==1){
           Serial.print("TX answer query ");
           Serial.print(UdpCommand.remoteIP());
           Serial.print(":");
@@ -403,22 +704,27 @@ void RX_UDP(){
           Serial.print(TxUdpBuffer[1], BIN);
           Serial.print(" BankC: ");
           Serial.println(TxUdpBuffer[2], BIN);
-        #endif
+        }
     }
 
-    // RX Bank0-2  r:###;
-    // if ( (packetBuffer[0] == 's' || packetBuffer[0] == 'm')
-    if ( (packetBuffer[0] == Listens)
-      && packetBuffer[1] == ':' && packetBuffer[2] != 'q'){
-      if(packetBuffer[5] == ';'){
-        ShiftOutByte[2] = packetBuffer[4];    // Bank2
-        ShiftOutByte[1] = packetBuffer[3];    // Bank1
-        ShiftOutByte[0] = packetBuffer[2];    // Bank0
+    //------------------------------------------------------------------------
+    // RX switch Bank0-2  [mro]X:###;
+    if ( (packetBuffer[0] == TxUdpBuffer[0])  // Listen source
+      && String(packetBuffer[1]).toInt()==NET_ID  // NET-ID
+      && packetBuffer[2] == ':' ){
+
+      if(packetBuffer[6] == ';'){
+        ShiftOutByte[2] = packetBuffer[5];    // Bank2
+        ShiftOutByte[1] = packetBuffer[4];    // Bank1
+        ShiftOutByte[0] = packetBuffer[3];    // Bank0
+      }else if(packetBuffer[5] == ';'){
+        ShiftOutByte[2] = 0x00;
+        ShiftOutByte[1] = packetBuffer[4];    // Bank1
+        ShiftOutByte[0] = packetBuffer[3];    // Bank0
       }else if(packetBuffer[4] == ';'){
-        ShiftOutByte[1] = packetBuffer[3];    // Bank1
-        ShiftOutByte[0] = packetBuffer[2];    // Bank0
-      }else if(packetBuffer[3] == ';'){
-        ShiftOutByte[0] = packetBuffer[2];    // Bank0
+        ShiftOutByte[2] = 0x00;
+        ShiftOutByte[1] = 0x00;
+        ShiftOutByte[0] = packetBuffer[3];    // Bank0
       }
 
       // SHIFT OUT
@@ -432,15 +738,15 @@ void RX_UDP(){
 
       // ANSWER CONFIRM PACKET
       #if defined(UdpAnswer)
-        TxUdpBuffer[2]=ShiftOutByte[0];    // set buffer
-        TxUdpBuffer[3]=ShiftOutByte[1];
-        TxUdpBuffer[4]=ShiftOutByte[2];
+        TxUdpBuffer[3]=ShiftOutByte[0];    // set buffer
+        TxUdpBuffer[4]=ShiftOutByte[1];
+        TxUdpBuffer[5]=ShiftOutByte[2];
         UdpCommand.beginPacket(UdpCommand.remoteIP(), UdpCommand.remotePort());   // Send to IP and port from recived UDP command
           UdpCommand.write(TxUdpBuffer, sizeof(TxUdpBuffer));   // send buffer
           // Serial.write(TxUdpBuffer, sizeof(TxUdpBuffer));   // send buffer
         UdpCommand.endPacket();
 
-        #if defined(SERIAL_DEBUG)
+        if(EnableSerialDebug==1){
         // Serial.print("RX  packetBuffer[2] (Char) ");
         // Serial.println(packetBuffer[2]);
         // Serial.print("SET ShiftOutByte[0] (byte) ");
@@ -453,59 +759,64 @@ void RX_UDP(){
           Serial.print(UdpCommand.remotePort());
           Serial.print(" ");
           // Serial.print("BankA: ");
-          Serial.print(TxUdpBuffer[2], BIN);
-          Serial.print(" | ");
+          Serial.print(char(TxUdpBuffer[0]));
+          Serial.print(char(TxUdpBuffer[1]));
+          Serial.print(char(TxUdpBuffer[2]));
           Serial.print(TxUdpBuffer[3], BIN);
           Serial.print(" | ");
           Serial.print(TxUdpBuffer[4], BIN);
+          Serial.print(" | ");
+          Serial.print(TxUdpBuffer[5], BIN);
+          Serial.print(char(TxUdpBuffer[6]));
           #if defined(WIFI)
             Serial.print(" | dBm: ");
             Serial.print(WiFi.RSSI());
           #endif
           Serial.println();
-        #endif
+        }
       #endif
     }
 
+    //------------------------------------------------------------------------
     // ANSWER TO querry Broadcast
     if ( packetBuffer[0] == 'b'
       && packetBuffer[1] == ':'
-      && packetBuffer[2] == Listens
-      && ( (Listens=='m' && String(packetBuffer[3]).toInt()==RELAY_BOARD_ID)
-        || (Listens=='d' && String(packetBuffer[3]).toInt()==RELAY_BOARD_ID)
-        || (Listens=='o') )
+      && packetBuffer[2] == TxUdpBuffer[0]
+      && ( (TxUdpBuffer[0]=='m' && String(packetBuffer[3]).toInt()==NET_ID)
+        || (TxUdpBuffer[0]=='r' && String(packetBuffer[3]).toInt()==NET_ID)
+        || (TxUdpBuffer[0]=='o') )
       && packetBuffer[4] == ';'
        ){
 
-      #if defined(SERIAL_DEBUG)
+      if(EnableSerialDebug==1){
         Serial.print("RX b:");
         Serial.print(packetBuffer[2]);
         Serial.print(String(packetBuffer[3]).toInt() );
         // Serial.print("/");
-        // Serial.print(RELAY_BOARD_ID, HEX);
+        // Serial.print(NET_ID, HEX);
         Serial.print(";");
         Serial.print(UdpCommand.remoteIP());
         Serial.print(":");
         Serial.println(UdpCommand.remotePort());
-      #endif
+      }
       digitalWrite(BCD[1], HIGH);
       delay(100);
       digitalWrite(BCD[1], LOW);
-      SendBroadcastUdp(1);    // 0=broadcast, 1= direct to RX IP
+      TxUDP('s', packetBuffer[1], 'b', 'r', 'o', 1);    // 0=broadcast, 1= direct to RX IP
     }
 
     memset(packetBuffer,0,sizeof(packetBuffer));    // clear array
   }
-}
+}*/
 //-------------------------------------------------------------------------------------------------------
 
 void http(){
   // listen for incoming clients
   WiFiClient client = server.available();
   if (client) {
-    #if defined(SERIAL_DEBUG)
+    if(EnableSerialDebug==1){
       Serial.println("WIFI New client");
-    #endif
+    }
     memset(linebuf,0,sizeof(linebuf));
     charcount=0;
     // an http request ends with a blank line
@@ -514,9 +825,9 @@ void http(){
       if (client.available()) {
         char c = client.read();
         HTTP_req += c;
-        // #if defined(SERIAL_DEBUG)
+        // if(EnableSerialDebug==1){
         //   Serial.write(c);
-        // #endif
+        // }
         //read char by char HTTP request
         linebuf[charcount]=c;
         if (charcount<sizeof(linebuf)-1) charcount++;
@@ -535,7 +846,7 @@ void http(){
           client.println(F("<head>"));
           client.print(F("<title>"));
           client.println(F("IP switch ID#"));
-          client.println(RELAY_BOARD_ID);
+          client.println(NET_ID);
           client.println(F("</title>"));
           // client.print(F("<meta http-equiv=\"refresh\" content=\"10"));
           client.print(F("<meta http-equiv=\"refresh\" content=\"10;url=http://"));
@@ -567,22 +878,22 @@ void http(){
           //   // SetPin(GETOUTPUT.toInt(), !OutputPinStatus[GETOUTPUT.toInt()]);
           //   ReversePin(GETOUTPUT.toInt());
           if(GETOUTPUT.toInt()==1){
-            Listens='o';
+            TxUdpBuffer[2]='o';
             EEPROM.write(0, 'o'); // address, value
             EEPROM.commit();
-            SendBroadcastUdp(0);    // 0=broadcast, 1= direct to RX IP
+            TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
           }
           if(GETOUTPUT.toInt()==2){
-            Listens='d';
-            EEPROM.write(0, 'd'); // address, value
+            TxUdpBuffer[2]='r';
+            EEPROM.write(0, 'r'); // address, value
             EEPROM.commit();
-            SendBroadcastUdp(0);    // 0=broadcast, 1= direct to RX IP
+            TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
           }
           if(GETOUTPUT.toInt()==3){
-            Listens='m';
+            TxUdpBuffer[2]='m';
             EEPROM.write(0, 'm'); // address, value
             EEPROM.commit();
-            SendBroadcastUdp(0);    // 0=broadcast, 1= direct to RX IP
+            TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
           }
 
           // client.println("<h1>RemoteSwitch </h1>");
@@ -627,23 +938,26 @@ void http(){
           #endif
 
           client.print(F(" | Version: "));
-          client.println(F(REV));
+          client.print(F(REV));
+          client.print(F(" | Uptime: "));
+          client.print(millis()/1000);
+          client.println(F(" s"));
 
           client.println(F("<form method=\"get\">Source: "));
           client.print("<input type=\"submit\" name=\"S1\" value=\"Open Interface III\" class=\"");
-          if(Listens == 'o'){
+          if(TxUdpBuffer[2] == 'o'){
             client.print("g");
           }else{
             client.print("r");
           }
           client.print("\"><input type=\"submit\" name=\"S2\" value=\"Band decoder MK2\" class=\"");
-          if(Listens == 'd'){
+          if(TxUdpBuffer[2] == 'r'){
             client.print("g");
           }else{
             client.print("r");
           }
           client.print("\"><input type=\"submit\" name=\"S3\" value=\"Manual IP switch\" class=\"");
-          if(Listens == 'm'){
+          if(TxUdpBuffer[2] == 'm'){
             client.print("g");
           }else{
             client.print("r");
@@ -653,9 +967,9 @@ void http(){
           client.println(F("\"></form><p><a href=\".\" onclick=\"window.open( this.href, this.href, 'width=400,height=180,left=0,top=0,menubar=no,location=no,status=no' ); return false;\" > split&#8599;</a></p>"));
           client.println(F("</body></html>"));
 
-          #if defined(SERIAL_DEBUG)
+          if(EnableSerialDebug==1){
             Serial.print(HTTP_req);
-          #endif
+          }
           HTTP_req = "";
 
           break;
@@ -681,9 +995,9 @@ void http(){
 
     // close the connection:
     client.stop();
-   #if defined(SERIAL_DEBUG)
+   if(EnableSerialDebug==1){
      Serial.println("WIFI client disconnected");
-   #endif
+   }
   }
 }
 //-------------------------------------------------------------------------------------------------------
@@ -724,7 +1038,7 @@ void EthEvent(WiFiEvent_t event)
       delay(100);
       digitalWrite(BCD[1], LOW);
 
-      SendBroadcastUdp(0);    // 0=broadcast, 1= direct to RX IP
+      TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
       break;
     case SYSTEM_EVENT_ETH_DISCONNECTED:
       Serial.println("ETH  Disconnected");
@@ -738,14 +1052,15 @@ void EthEvent(WiFiEvent_t event)
       break;
   }
 }
-//-------------------------------------------------------------------------------------------------------
 
+//-------------------------------------------------------------------------------------------------------
+/*
 void SendBroadcastUdp(bool DIRECT){
   if(DIRECT==0){
     BroadcastIP = ~ETH.subnetMask() | ETH.gatewayIP();
     Serial.print("TX UDP broadcast packet [b:s");
-    Serial.print(Listens);
-    Serial.print(RELAY_BOARD_ID, HEX);
+    Serial.print(char(TxUdpBuffer[0]));
+    Serial.print(NET_ID, HEX);
     Serial.print(";] to ");
     Serial.print(BroadcastIP);
     Serial.print(":");
@@ -754,16 +1069,16 @@ void SendBroadcastUdp(bool DIRECT){
     UdpCommand.beginPacket(BroadcastIP, BroadcastPort);   // Send to IP and port from recived UDP command
     // UdpCommand.beginMulticast(UdpCommand.BroadcastIP(), BroadcastPort, ETH.localIP()).
       UdpCommand.print("b:s");
-      UdpCommand.print(Listens);
-      UdpCommand.print(RELAY_BOARD_ID, HEX);
+      UdpCommand.print(char(TxUdpBuffer[0]));
+      UdpCommand.print(NET_ID, HEX);
       UdpCommand.print(";");
     UdpCommand.endPacket();
 
   // DIRECT
   }else{
     Serial.print("TX UDP direct packet [b:s");
-    Serial.print(Listens);
-    Serial.print(RELAY_BOARD_ID, HEX);
+    Serial.print(char(TxUdpBuffer[0]));
+    Serial.print(NET_ID, HEX);
     Serial.print(";] to ");
     Serial.print(UdpCommand.remoteIP());
     Serial.print(":");
@@ -771,12 +1086,12 @@ void SendBroadcastUdp(bool DIRECT){
 
     UdpCommand.beginPacket(UdpCommand.remoteIP(), UdpCommand.remotePort());   // Send to IP and port from recived UDP command
       UdpCommand.print("b:s");
-      UdpCommand.print(Listens);
-      UdpCommand.print(RELAY_BOARD_ID, HEX);
+      UdpCommand.print(char(TxUdpBuffer[0]));
+      UdpCommand.print(NET_ID, HEX);
       UdpCommand.print(";");
     UdpCommand.endPacket();
   }
-}
+}*/
 //-------------------------------------------------------------------------------------------------------
 
 void testClient(const char * host, uint16_t port)
