@@ -31,6 +31,7 @@ Remote USB access
 HARDWARE ESP32-GATEWAY
 
 Changelog:
+2019-02 - multi control support
 2019-01 - add CLI
         - redesign UDP communications
         - NET-ID prefix/sufix support
@@ -49,9 +50,9 @@ Changelog:
 // const char* password = "";
 
 //-------------------------------------------------------------------------------------------------------
-const char* REV = "20190121";
+const char* REV = "20190225";
 #define EnableOTA                // Enable flashing ESP32 Over The Air
-#define HW_BCD_SW                // enable hardware ID board bcd switch (disable if not installed)
+bool HW_BCD_SW = 0;              // enable hardware ID board bcd switch (disable if not installed)
 int NumberOfEncoderOutputs = 8;  // 2-16
 long HW_BCD_SWTimer[2]{0,3000};
 byte NET_ID = 0x00;              // Unique ID number [0-F] hex format - over BCD switch
@@ -61,6 +62,8 @@ bool EnableSerialDebug     = 0;
 #define ShiftOut                 // Enable ShiftOut register
 #define UdpAnswer                // Send UDP answer confirm packet
 int BroadcastPort       = 88;    // destination broadcast packet port
+bool EnableGroupPrefix = 0;      // enable multi controller control
+byte DetectedRemoteSw[16][5];
 
 const int SERIAL_BAUDRATE = 115200; // serial debud baudrate
 int incomingByte = 0;   // for incoming serial data
@@ -77,7 +80,7 @@ int i = 0;
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include "EEPROM.h"
-#define EEPROM_SIZE 3   // 1-listen source, 2-net ID, 3-encoder range
+#define EEPROM_SIZE 5   // 0-listen source, 1-net ID, 2-encoder range, 3-HW_BCD_SW, 4-EnableGroupPrefix
 
 WiFiServer server(HTTP_SERVER_PORT);
 // Client variables
@@ -94,6 +97,7 @@ byte TxUdpBuffer[8];
 #include <ETH.h>
 static bool eth_connected = false;
 IPAddress RemoteSwIP(0, 0, 0, 0);         // remote UDP IP switch - set from UDP DetectRemote array
+int RemoteSwPort         = 0;             // remote UDP IP switch port
 String HTTP_req;
 #if defined(EnableOTA)
   #include <ESPmDNS.h>
@@ -102,6 +106,10 @@ String HTTP_req;
 //-------------------------------------------------------------------------------------------------------
 
 void setup() {
+  Serial.begin(SERIAL_BAUDRATE);
+  while(!Serial) {
+    ; // wait for serial port to connect. Needed for native USB port only
+  }
   #if defined(ShiftOut)
     pinMode(ShiftOutLatchPin, OUTPUT);
     pinMode(ShiftOutClockPin, OUTPUT);
@@ -118,6 +126,7 @@ void setup() {
       Serial.println("failed to initialise EEPROM"); delay(1);
     }
   }
+  // 0-listen source
   TxUdpBuffer[2] = EEPROM.read(0);
   if(TxUdpBuffer[2]=='o'||TxUdpBuffer[2]=='r'||TxUdpBuffer[2]=='m'){
     // OK
@@ -125,28 +134,42 @@ void setup() {
     TxUdpBuffer[2]='m';
   }
 
-  #if defined(HW_BCD_SW)
+  // 1-net ID
+  if(HW_BCD_SW==true){
     bitClear(NET_ID, 0);
     bitClear(NET_ID, 1);
     bitClear(NET_ID, 2);
     bitClear(NET_ID, 3);
     NET_ID = NET_ID | GetBoardId();
     TxUdpBuffer[0] = NET_ID;
-  #else
+  }else{
       NET_ID = EEPROM.read(1);
       TxUdpBuffer[0] = NET_ID;
-  #endif
+  }
 
+  // 2-encoder range
   NumberOfEncoderOutputs = EEPROM.read(2);
   if(NumberOfEncoderOutputs < 2 || NumberOfEncoderOutputs > 0x0f){
     NumberOfEncoderOutputs=8;
   }
 
+  // 3-HW_BCD_SW
+  Serial.print("HW BCD on/off ");
+  if(EEPROM.read(3)<2){
+    HW_BCD_SW = EEPROM.read(3);
+    Serial.println("read from EEPROM");
+  }else{
+    Serial.println("set to OFF");
+  }
+
+  // 4-EnableGroupPrefix
+  // Serial.print("Enable group NET-ID prefix ");
+  if(EEPROM.read(4)<2){
+    EnableGroupPrefix=EEPROM.read(4);
+  }
+  // Serial.println(EnableGroupPrefix);
+
   // if(EnableSerialDebug==1){
-    Serial.begin(SERIAL_BAUDRATE);
-    while(!Serial) {
-      ; // wait for serial port to connect. Needed for native USB port only
-    }
     Serial.println();
     Serial.print("Version: ");
     Serial.println(REV);
@@ -167,21 +190,9 @@ void setup() {
       Serial.println("IP switch master");
     }
     Serial.println("===============================");
-    Serial.println("---------------------------------------------");
-    Serial.println("  You can change source, with send character:");
-    Serial.println("      m - IP switch master");
-    Serial.println("      r - Band decoder");
-    Serial.println("      o - Open Interface III");
-    Serial.println("  or '?' for info");
-    Serial.println("     '*' serial debug on/off");
-    Serial.println("    #0-f network ID prefix [hex]");
-    #if !defined(HW_BCD_SW)
-      Serial.println("         +network ID sufix [hex]");
-    #endif
-    Serial.print("    n2-g set encoder range (now ");
-    Serial.print(NumberOfEncoderOutputs+1);
-    Serial.println(")");
-    Serial.println("---------------------------------------------");
+    Serial.println("  press '?' for list commands");
+    Serial.println();
+    Serial.println();
   // }
 
   #if defined(WIFI)
@@ -286,7 +297,7 @@ void loop() {
 
 // SUBROUTINES -------------------------------------------------------------------------------------------------------
 void CheckNetId(){
-  #if defined(HW_BCD_SW)
+  if (HW_BCD_SW==true){
     if(millis()-HW_BCD_SWTimer[0]>HW_BCD_SWTimer[1]){
       bitClear(NET_ID, 0);
       bitClear(NET_ID, 1);
@@ -315,7 +326,7 @@ void CheckNetId(){
       }
       HW_BCD_SWTimer[0]=millis();
     }
-  #endif
+  }
 }
 
 //-------------------------------------------------------------------------------------------------------
@@ -353,7 +364,6 @@ void SerialCLI(){
             if(TxUdpBuffer[2] == 'm'){
               TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
             }
-
           // o
           }else if(incomingByte==111){
             TxUdpBuffer[2] = 'o';
@@ -380,40 +390,94 @@ void SerialCLI(){
               Serial.println("DISABLE **");
             }
 
+          // @
+        }else if(incomingByte==64){
+            Serial.print("** IP switch will be restarted **");
+            ESP.restart();
+
+        // +
+        }else if(incomingByte==43){
+            HW_BCD_SW=!HW_BCD_SW;
+            Serial.print("** Net ID sufix by ");
+            EEPROM.write(3, HW_BCD_SW);
+            EEPROM.commit();
+            if(HW_BCD_SW==true){
+              Serial.println("EEPROM/[BCD switch] **");
+              bitClear(NET_ID, 0);
+              bitClear(NET_ID, 1);
+              bitClear(NET_ID, 2);
+              bitClear(NET_ID, 3);
+              NET_ID = NET_ID | GetBoardId();
+              TxUdpBuffer[0] = NET_ID;
+            }else{
+              NET_ID = EEPROM.read(1);
+              TxUdpBuffer[0] = NET_ID;
+              Serial.println("[EEPROM]/BCD switch **");
+            }
+
+      // $
+      }else if(incomingByte==36){
+            EnableGroupPrefix=!EnableGroupPrefix;
+            Serial.print("** Group sufix (multi control) [");
+            EEPROM.write(4, EnableGroupPrefix);
+            EEPROM.commit();
+            if(EnableGroupPrefix==true){
+              Serial.println("ON] **");
+            }else{
+              Serial.println("OFF] **");
+            }
+            if(EnableGroupPrefix==true){
+              // clear prefix
+              bitClear(NET_ID, 4);
+              bitClear(NET_ID, 5);
+              bitClear(NET_ID, 6);
+              bitClear(NET_ID, 7); // <-
+            }
+
       // #
       }else if(incomingByte==35){
-          Serial.println("Press NET-ID X_ prefix 0-f...");
+          if(EnableGroupPrefix==false){
+            Serial.println("Press NET-ID X_ prefix 0-f...");
+          }else{
+            Serial.println("Press NET-ID _X sufix 0-f...");
+          }
           Serial.print("> ");
           while (Serial.available() == 0) {
             // Wait
           }
           incomingByte = Serial.read();
+
           if( (incomingByte>=48 && incomingByte<=57) || (incomingByte>=97 && incomingByte<=102) ){
-            bitClear(NET_ID, 4);
-            bitClear(NET_ID, 5);
-            bitClear(NET_ID, 6);
-            bitClear(NET_ID, 7);
-            Serial.write(incomingByte);
-            Serial.println();
-            if(incomingByte>=48 && incomingByte<=57){
-              incomingByte = incomingByte-48;
-              incomingByte = (byte)incomingByte << 4;
-              NET_ID = NET_ID | incomingByte;
-              TxUdpBuffer[0] = NET_ID;
-            }else if(incomingByte>=97 && incomingByte<=102){
-              incomingByte = incomingByte-87;
-              incomingByte = (byte)incomingByte << 4;
-              NET_ID = NET_ID | incomingByte;
-              TxUdpBuffer[0] = NET_ID;
+            // prefix
+            if(EnableGroupPrefix==false){
+              bitClear(NET_ID, 4);
+              bitClear(NET_ID, 5);
+              bitClear(NET_ID, 6);
+              bitClear(NET_ID, 7);
+              Serial.write(incomingByte);
+              Serial.println();
+              if(incomingByte>=48 && incomingByte<=57){
+                incomingByte = incomingByte-48;
+                incomingByte = (byte)incomingByte << 4;
+                NET_ID = NET_ID | incomingByte;
+                TxUdpBuffer[0] = NET_ID;
+              }else if(incomingByte>=97 && incomingByte<=102){
+                incomingByte = incomingByte-87;
+                incomingByte = (byte)incomingByte << 4;
+                NET_ID = NET_ID | incomingByte;
+                TxUdpBuffer[0] = NET_ID;
+              }
             }
             // sufix
-            #if !defined(HW_BCD_SW)
-              Serial.println("Press NET-ID _X sufix 0-f...");
-              Serial.print("> ");
-              while (Serial.available() == 0) {
-                // Wait
+            if(HW_BCD_SW==false){
+              if(EnableGroupPrefix==false){
+                Serial.println("Press NET-ID _X sufix 0-f...");
+                Serial.print("> ");
+                while (Serial.available() == 0) {
+                  // Wait
+                }
+                incomingByte = Serial.read();
               }
-              incomingByte = Serial.read();
               if( (incomingByte>=48 && incomingByte<=57) || (incomingByte>=97 && incomingByte<=102) ){
                 bitClear(NET_ID, 0);
                 bitClear(NET_ID, 1);
@@ -430,7 +494,7 @@ void SerialCLI(){
                   NET_ID = NET_ID | incomingByte;
                   TxUdpBuffer[0] = NET_ID;
                 }
-            #endif
+            // #endif
                 EEPROM.write(1, NET_ID); // address, value
                 EEPROM.commit();
                 Serial.print("** Now NET-ID change to 0x");
@@ -448,18 +512,36 @@ void SerialCLI(){
                 if(TxUdpBuffer[2] == 'm'){
                   TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
                 }
-            #if !defined(HW_BCD_SW)
+            // #if !defined(HW_BCD_SW)
               }else{
                 Serial.println(" accepts 0-f, exit");
               }
-            #endif
+            // #endif
+            }
           }else{
             Serial.println(" accepts 0-f, exit");
           }
 
-      // n
-      }else if(incomingByte==110 && TxUdpBuffer[2] == 'm'){
-          Serial.println("Press 2-g for encoder rannge number 2-16...");
+      // .
+    }else if(incomingByte==46 && TxUdpBuffer[2]=='m' && EnableGroupPrefix){
+            Serial.println("List detected IP switch by NET-ID prefix (multi control)");
+            for (int i = 0; i < 16; i++) {
+              Serial.print(i, HEX);
+              Serial.print(F("  "));
+              Serial.print(DetectedRemoteSw [i] [0]);
+              Serial.print(F("."));
+              Serial.print(DetectedRemoteSw [i] [1]);
+              Serial.print(F("."));
+              Serial.print(DetectedRemoteSw [i] [2]);
+              Serial.print(F("."));
+              Serial.print(DetectedRemoteSw [i] [3]);
+              Serial.print(F(":"));
+              Serial.println(DetectedRemoteSw [i] [4]);
+            }
+
+      // /
+    }else if(incomingByte==47 && TxUdpBuffer[2] == 'm'){
+          Serial.println("press 2-g for encoder rannge number 2-16...");
           Serial.print(">");
           while (Serial.available() == 0) {
             // Wait
@@ -494,94 +576,146 @@ void SerialCLI(){
 
           // ?
         }else if(incomingByte==63){
-
-            Serial.println();
-            #if defined(ETHERNET)
-              Serial.println("  IP Switch with ESP32-GATEWAY");
-              Serial.println("  =================================");
-              Serial.print("  http://");
-              Serial.println(ETH.localIP());
-              Serial.print("  ETH  MAC: ");
-              Serial.println(ETH.macAddress());
-              Serial.print("  ");
-              Serial.print(ETH.linkSpeed());
-              Serial.print("Mbps");
-              if (ETH.fullDuplex()) {
-                Serial.print(", FULL_DUPLEX ");
-              }
-              Serial.println();
-            #else
-              Serial.println("  ETHERNET OFF");
-            #endif
-            #if defined(WIFI)
-              Serial.println("  =================================");
-              Serial.print("  http://");
-              Serial.println(WiFi.localIP());
-              Serial.print("  dBm: ");
-              Serial.println(WiFi.RSSI());
-            #else
-              Serial.println("  WIFI OFF");
-            #endif
-            Serial.println("  =================================");
-            Serial.print("  Device NET-ID: 0x");
-            if(NET_ID <=0x0f){
-              Serial.print(F("0"));
-            }
-            Serial.println(NET_ID, HEX);
-            // Serial.print(" [BCD-");
-            // for (int i = 0; i < 4; i++) {
-            //  Serial.print(digitalRead(BCD[i]));
-            // }
-            // Serial.println("]");
-            Serial.print("  Listen master: ");
-            Serial.println(char(TxUdpBuffer[2]));
-            Serial.println("  =================================");
-            Serial.print("  Master IP: ");
-            Serial.print(UdpCommand.remoteIP());
-            Serial.print(":");
-            Serial.println(UdpCommand.remotePort());
-            Serial.print("  Uptime: ");
-            Serial.print(millis()/1000);
-            Serial.println(" second");
-            Serial.print("  Version: ");
-            Serial.println(REV);
-
-
-            Serial.print("  Serial debug: ");
-            if(EnableSerialDebug==true){
-              Serial.println("ENABLE");
-            }else{
-              Serial.println("DISABLE");
-            }
-            Serial.print("  Bank status ABC [LSBFIRST]: ");
-            Serial.print(ShiftOutByte[0], BIN);
-            Serial.print(" ");
-            Serial.print(ShiftOutByte[1], BIN);
-            Serial.print(" ");
-            Serial.println(ShiftOutByte[2], BIN);
-            Serial.println("---------------------------------------------");
-            Serial.println("  You can change source, with send character:");
-            Serial.println("      m - IP switch master");
-            Serial.println("      r - Band decoder");
-            Serial.println("      o - Open Interface III");
-            Serial.println("  or '?' for info");
-            Serial.println("     '*' serial debug on/off");
-            Serial.println("    #0-f network ID prefix [hex]");
-            #if !defined(HW_BCD_SW)
-              Serial.println("         +network ID sufix [hex]");
-            #endif
-            Serial.print("    n2-g set encoder range (now ");
-            Serial.print(NumberOfEncoderOutputs+1);
-            Serial.println(")");
-            Serial.println("---------------------------------------------");
-          }else{
-            Serial.print(" [");
-            Serial.write(incomingByte); //, DEC);
-            Serial.println("] unknown command");
-          }
+            ListCommands();
+        }else{
+          Serial.print(" [");
+          Serial.write(incomingByte); //, DEC);
+          Serial.println("] unknown command");
+          ListCommands();
+        }
   }
 }
 
+//-------------------------------------------------------------------------------------------------------
+void ListCommands(){
+  Serial.println();
+  #if defined(ETHERNET)
+    Serial.println("  IP relay ESP32-GATEWAY status");
+    // Serial.println("  =================================");
+    Serial.print("  http://");
+    Serial.println(ETH.localIP());
+    Serial.print("  ETH  MAC: ");
+    Serial.println(ETH.macAddress());
+    Serial.print("  ");
+    Serial.print(ETH.linkSpeed());
+    Serial.print("Mbps");
+    if (ETH.fullDuplex()) {
+      Serial.print(", FULL_DUPLEX ");
+    }
+    Serial.println();
+  #else
+    Serial.println("  ETHERNET OFF");
+  #endif
+  #if defined(WIFI)
+    Serial.println("  =================================");
+    Serial.print("  http://");
+    Serial.println(WiFi.localIP());
+    Serial.print("  dBm: ");
+    Serial.println(WiFi.RSSI());
+  #else
+    Serial.println("  WIFI OFF");
+  #endif
+  Serial.println("  =================================");
+  Serial.print("  Device NET-ID: 0x");
+  if(NET_ID <=0x0f){
+    Serial.print(F("0"));
+  }
+  Serial.print(NET_ID, HEX);
+  if(HW_BCD_SW==true){
+    Serial.print(" [BCD-");
+    for (int i = 0; i < 4; i++) {
+     Serial.print(digitalRead(BCD[i]));
+    }
+    Serial.print("]");
+  }
+  Serial.println();
+  Serial.print("  Listen master: ");
+  Serial.println(char(TxUdpBuffer[2]));
+  Serial.println("  =================================");
+  if(EnableGroupPrefix==false){
+    Serial.print("  Master IP: ");
+    Serial.print(UdpCommand.remoteIP());
+    Serial.print(":");
+    Serial.println(UdpCommand.remotePort());
+  }
+  Serial.print("  Uptime: ");
+  Serial.print(millis()/1000);
+  Serial.println(" second");
+  Serial.print("  Version: ");
+  Serial.println(REV);
+  Serial.print("  Bank status ABC [LSBFIRST]: ");
+  Serial.print(ShiftOutByte[0], BIN);
+  Serial.print(" ");
+  Serial.print(ShiftOutByte[1], BIN);
+  Serial.print(" ");
+  Serial.println(ShiftOutByte[2], BIN);
+  Serial.println("---------------------------------------------");
+  Serial.println("  You can change source, with send character:");
+  Serial.println("      m - IP switch master");
+  Serial.println("      r - Band decoder");
+  Serial.println("      o - Open Interface III");
+  Serial.println();
+  Serial.println("  or  ?  list status and commands");
+  Serial.print("      /  set encoder range - now [");
+  Serial.print(NumberOfEncoderOutputs+1);
+  Serial.println("]");
+  Serial.print("      *  Serial debug on/off [");
+    if(EnableSerialDebug==true){
+      Serial.println("ON]");
+    }else{
+      Serial.println("OFF]");
+    }
+  Serial.print("      +  Net ID sufix by ");
+    if(HW_BCD_SW==true){
+      Serial.println("EEPROM/[BCD switch]");
+    }else{
+      Serial.println("[EEPROM]/BCD switch");
+    }
+  Serial.print("      #  network ID prefix [");
+  byte ID = NET_ID;
+  bitClear(ID, 0); // ->
+  bitClear(ID, 1);
+  bitClear(ID, 2);
+  bitClear(ID, 3);
+  ID = ID >> 4;
+  if(EnableGroupPrefix==false){
+    Serial.print(ID, HEX);
+  }else{
+    Serial.print("x");
+  }
+  Serial.print("] hex");
+  if(TxUdpBuffer[2]=='m' && EnableGroupPrefix==true){
+    Serial.print(" (set only on controllers)");
+  }
+  Serial.println();
+  if(HW_BCD_SW==false){
+    ID = NET_ID;
+    bitClear(ID, 4);
+    bitClear(ID, 5);
+    bitClear(ID, 6);
+    bitClear(ID, 7); // <-
+    Serial.print("         +network ID sufix [");
+    Serial.print(ID, HEX);
+    Serial.print("] hex");
+    if(TxUdpBuffer[2]=='m' && EnableGroupPrefix==true){
+      Serial.print(" (multi control group - same at all)");
+    }
+    Serial.println();
+  }
+  if(TxUdpBuffer[2]=='m'){
+    Serial.print("      $  Group network ID prefix (multi control) [");
+    if(EnableGroupPrefix==true){
+      Serial.println("ON]");
+    }else{
+      Serial.println("OFF]");
+    }
+  }
+  if(TxUdpBuffer[2]=='m' && EnableGroupPrefix==true){
+    Serial.println("      .  list detected IP switch (multi control)");
+  }
+  Serial.println("      @  restart IP switch");
+  Serial.println("---------------------------------------------");
+}
 //-------------------------------------------------------------------------------------------------------
 
 void Demo(){
@@ -633,7 +767,6 @@ void Demo(){
   #endif
 }
 
-
 // http://www.catonmat.net/blog/low-level-bit-hacks-you-absolutely-must-know/
 //-------------------------------------------------------------------------------------------------------
 
@@ -653,6 +786,27 @@ byte GetBoardId(){
   }
   return NETID;
 }
+//---------------------------------------------------------------------------------------------------------
+
+byte IdPrefix(byte ID){
+  bitClear(ID, 0);  // ->
+  bitClear(ID, 1);
+  bitClear(ID, 2);
+  bitClear(ID, 3);
+  ID = ID >> 4;
+  return(ID);
+}
+
+//---------------------------------------------------------------------------------------------------------
+
+byte IdSufix(byte ID){
+  bitClear(ID, 4);
+  bitClear(ID, 5);
+  bitClear(ID, 6);
+  bitClear(ID, 7);  // <-
+  return(ID);
+}
+
 //-------------------------------------------------------------------------------------------------------
 byte AsciiToHex(int ASCII){
   if(ASCII>=48 && ASCII<=57){
@@ -683,7 +837,8 @@ void RX_UDP(){
     UdpCommand.read(packetBuffer, 10);      // read the packet into packetBufffer
     // Print RAW
     if(EnableSerialDebug==1){
-      Serial.print(F("RXraw ["));
+      Serial.println();
+      Serial.print("RXraw [");
       Serial.print(packetBuffer[0], HEX);
       for(int i=1; i<8; i++){
         Serial.print(char(packetBuffer[i]));
@@ -696,11 +851,20 @@ void RX_UDP(){
     }
 
     // ID-FROM-TO filter
-    if(String(packetBuffer[0], DEC).toInt()==NET_ID
+    if(
+      (EnableGroupPrefix==false
+      && String(packetBuffer[0], DEC).toInt()==NET_ID
       && packetBuffer[1]==TxUdpBuffer[2]  // FROM Switch
       && packetBuffer[2]== 's'  // TO
       && packetBuffer[3]== ':'
-      && packetBuffer[7]== ';'
+      && packetBuffer[7]== ';')
+      ||
+      (EnableGroupPrefix==true
+      && IdSufix(packetBuffer[0])==IdSufix(NET_ID)
+      && packetBuffer[1]==TxUdpBuffer[2]  // FROM Switch
+      && packetBuffer[2]== 's'  // TO
+      && packetBuffer[3]== ':'
+      && packetBuffer[7]== ';')
     ){
 
       // RX Broadcast / CFM
@@ -708,8 +872,31 @@ void RX_UDP(){
         || (packetBuffer[4]== 'c' && packetBuffer[5]== 'f' && packetBuffer[6]== 'm')
         ){
 
+        if(EnableGroupPrefix==true){
+          IPAddress TmpAddr = UdpCommand.remoteIP();
+          DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [0]=TmpAddr[0];     // Switch IP addres storage to array
+          DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [1]=TmpAddr[1];
+          DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [2]=TmpAddr[2];
+          DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [3]=TmpAddr[3];
+          DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [4]=UdpCommand.remotePort();
+          if(EnableSerialDebug==1){
+            Serial.print("Detect controller ID ");
+            Serial.print(IdPrefix(packetBuffer[0]), HEX);
+            Serial.print(" on IP ");
+            Serial.print(DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [0]);
+            Serial.print(".");
+            Serial.print(DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [1]);
+            Serial.print(".");
+            Serial.print(DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [2]);
+            Serial.print(".");
+            Serial.print(DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [3]);
+            Serial.print(":");
+            Serial.println(DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [4]);
+          }
+        }
+
         if(EnableSerialDebug==1){
-          Serial.print(F("RX ["));
+          Serial.print("RX [");
           Serial.print(packetBuffer[0], HEX);
           for(int i=1; i<8; i++){
             Serial.print(char(packetBuffer[i]));
@@ -779,6 +966,15 @@ void RX_UDP(){
 }
 //-------------------------------------------------------------------------------------------------------
 
+unsigned char hexToDecBy4bit(unsigned char hex)
+// convert a character representation of a hexidecimal digit into the actual hexidecimal value
+{
+  if(hex > 0x39) hex -= 7; // adjust for hex letters upper or lower case
+  return(hex & 0xf);
+}
+
+//-------------------------------------------------------------------------------------------------------
+
 void TxUDP(byte FROM, byte TO, byte A, byte B, byte C, int DIRECT){
 
   // TxUdpBuffer[0] = NET_ID;
@@ -828,30 +1024,128 @@ void TxUDP(byte FROM, byte TO, byte A, byte B, byte C, int DIRECT){
     UdpCommand.beginPacket(RemoteSwIP, UdpCommand.remotePort());
   }
 
-  UdpCommand.write(TxUdpBuffer, sizeof(TxUdpBuffer));   // send buffer
-  UdpCommand.endPacket();
-
-  if(EnableSerialDebug==1){
-    Serial.print(TxUdpBuffer[0], HEX);
-    for (int i=1; i<4; i++){
-      Serial.print(char(TxUdpBuffer[i]));
+  // send
+  if(EnableGroupPrefix==false){
+    UdpCommand.write(TxUdpBuffer, sizeof(TxUdpBuffer));   // send buffer
+    UdpCommand.endPacket();
+    if(EnableSerialDebug==1){
+      Serial.print(TxUdpBuffer[0], HEX);
+      for (int i=1; i<4; i++){
+        Serial.print(char(TxUdpBuffer[i]));
+      }
+      Serial.print(TxUdpBuffer[4], BIN);
+      Serial.print(F("|"));
+      Serial.print(TxUdpBuffer[5], BIN);
+      Serial.print(F("|"));
+      Serial.print(TxUdpBuffer[6], BIN);
+      Serial.print(char(TxUdpBuffer[7]));
+      Serial.print(F("] "));
+      Serial.print(RemoteSwIP);
+      Serial.print(F(":"));
+      Serial.print(UdpCommand.remotePort());
+      #if defined(WIFI)
+        Serial.print(" | dBm: ");
+        Serial.print(WiFi.RSSI());
+      #endif
+      Serial.println();
     }
-    Serial.print(TxUdpBuffer[4], BIN);
-    Serial.print(F("|"));
-    Serial.print(TxUdpBuffer[5], BIN);
-    Serial.print(F("|"));
-    Serial.print(TxUdpBuffer[6], BIN);
-    Serial.print(char(TxUdpBuffer[7]));
-    Serial.print(F("] "));
-    Serial.print(RemoteSwIP);
-    Serial.print(F(":"));
-    Serial.print(UdpCommand.remotePort());
-    #if defined(WIFI)
-      Serial.print(" | dBm: ");
-      Serial.print(WiFi.RSSI());
-    #endif
-    Serial.println();
-  }
+
+  // send EnableGroupPrefix
+  }else{
+    // answer to RX ip
+    TxUdpBuffer[0]=packetBuffer[0];   // NET_ID by RX NET_ID
+    UdpCommand.write(TxUdpBuffer, sizeof(TxUdpBuffer));   // send buffer
+    UdpCommand.endPacket();
+    if(EnableSerialDebug==1){
+      Serial.print(TxUdpBuffer[0], HEX);
+      for (int i=1; i<4; i++){
+        Serial.print(char(TxUdpBuffer[i]));
+      }
+      Serial.print(TxUdpBuffer[4], BIN);
+      Serial.print(F("|"));
+      Serial.print(TxUdpBuffer[5], BIN);
+      Serial.print(F("|"));
+      Serial.print(TxUdpBuffer[6], BIN);
+      Serial.print(char(TxUdpBuffer[7]));
+      Serial.print(F("] "));
+      Serial.print(RemoteSwIP);
+      Serial.print(F(":"));
+      Serial.print(UdpCommand.remotePort());
+      #if defined(WIFI)
+        Serial.print(" | dBm: ");
+        Serial.print(WiFi.RSSI());
+      #endif
+      Serial.println();
+    }
+    // send to ip from storage
+    for (int i=0; i<16; i++){
+      if(DetectedRemoteSw[i][4]!=0){
+        TxUdpBuffer[0]=IdSufix(NET_ID) | i<<4;       // NET_ID by destination device
+        RemoteSwIP = DetectedRemoteSw[i];
+        RemoteSwPort = DetectedRemoteSw[i][4];
+        if(UdpCommand.remoteIP()!=RemoteSwIP){
+          UdpCommand.beginPacket(RemoteSwIP, RemoteSwPort);
+            UdpCommand.write(TxUdpBuffer, sizeof(TxUdpBuffer));   // send buffer
+          UdpCommand.endPacket();
+
+          if(EnableSerialDebug==1){
+            Serial.print(F("TX direct ID-"));
+            Serial.print(i, HEX);
+            Serial.print(IdSufix(NET_ID), HEX);
+            Serial.print(F(" "));
+            Serial.print(RemoteSwIP);
+            Serial.print(F(":"));
+            Serial.print(RemoteSwPort);
+            Serial.print(F(" ["));
+            Serial.print(TxUdpBuffer[0], HEX);
+            for (int i=1; i<8; i++){
+              Serial.print(char(TxUdpBuffer[i]));
+              // Serial.print(F(" "));
+            }
+            Serial.println("]");
+            #if defined(WIFI)
+              Serial.print("WiFi dBm: ");
+              Serial.print(WiFi.RSSI());
+            #endif
+            Serial.println();
+          }
+        }else{
+          if(EnableSerialDebug==1){
+            Serial.print(F("noTX - RX prefix "));
+            Serial.print(i, HEX);
+            Serial.print(F(" "));
+            Serial.print(RemoteSwIP);
+            Serial.print(F(":"));
+            Serial.println(RemoteSwPort);
+          }
+        }
+      }
+    }
+    // broadcast all prefix
+    if(A=='b' && B=='r' && C=='o' && DIRECT==0 && TxUdpBuffer[2] == 'm'){
+      if(EnableSerialDebug==1){
+        Serial.print("TX all prefix ");
+        Serial.print(RemoteSwIP);
+        Serial.print(":");
+        Serial.print(RemoteSwIP);
+      }
+      for (int i=0; i<16; i++){
+        TxUdpBuffer[0]=IdSufix(NET_ID) | (i<<4);
+        if(EnableSerialDebug==1){
+          Serial.print(" ");
+          Serial.print(TxUdpBuffer[0], HEX);
+        }
+        UdpCommand.beginPacket(RemoteSwIP, BroadcastPort);
+        UdpCommand.write(TxUdpBuffer, sizeof(TxUdpBuffer));   // send buffer
+        UdpCommand.endPacket();
+      }
+      if(EnableSerialDebug==1){
+        Serial.println();
+      }
+
+    }
+
+  } // end EnableGroupPrefix
 }
 //-------------------------------------------------------------------------------------------------------
 
@@ -919,6 +1213,7 @@ void http(){
           client.println(F("input.gr {background: #800;color: #fff;}"));
           client.println(F(".box {border: 2px solid #080;background: #ccc;  line-height: 2; margin: 10px 5px 0 5px;padding: 1px 7px 1px 7px;-webkit-border-radius: 5px;-moz-border-radius: 5px;border-radius: 5px;color : #000;}"));
           client.println(F(".boxr {border: 2px solid #800;background: #800; line-height: 2; margin: 10px 5px 0 5px;padding: 1px 7px 1px 7px;-webkit-border-radius: 5px;-moz-border-radius: 5px;border-radius: 5px;color : #fff;}"));
+          client.println(F(".boxg {border: 2px solid #888;background: #ccc; line-height: 2; margin: 10px 5px 0 5px;padding: 1px 7px 1px 7px;-webkit-border-radius: 5px;-moz-border-radius: 5px;border-radius: 5px;color : #888;}"));
           // client.println(F(".ptt {border: 2px solid #800;background: #ccc;margin: 10px 15px 0 10px;padding: 1px 7px 1px 7px;-webkit-border-radius: 5px;-moz-border-radius: 5px;border-radius: 5px;color : #800;}"));
           client.println(F("</style></head><body>"));
           String GETOUTPUT = HTTP_req.substring(7, 8);
@@ -952,6 +1247,27 @@ void http(){
               TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
             }
           }
+          if(GETOUTPUT.toInt()==4){
+            EnableGroupPrefix=!EnableGroupPrefix;
+            Serial.print("** Group sufix (multi control) [");
+            EEPROM.write(4, EnableGroupPrefix);
+            EEPROM.commit();
+            if(EnableGroupPrefix==true){
+              Serial.println("ON] **");
+            }else{
+              Serial.println("OFF] **");
+            }
+            if(EnableGroupPrefix==true){
+              // clear prefix
+              bitClear(NET_ID, 4);
+              bitClear(NET_ID, 5);
+              bitClear(NET_ID, 6);
+              bitClear(NET_ID, 7); // <-
+            }
+            if(TxUdpBuffer[2] == 'm'){
+              TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
+            }
+          }
 
           // client.println("<h1>RemoteSwitch </h1>");
           client.println("<p>Output status<br>");
@@ -961,13 +1277,22 @@ void http(){
             client.print(" ");
             for (int j = 0; j < 8; j++) {
               client.print("<span class=\"box");
-              if(bitRead(ShiftOutByte[i], j)==1){
-                client.print("r");
+              if( (i==1 && (j>NumberOfEncoderOutputs)) || (i==2 && (j>NumberOfEncoderOutputs-8)) ){
+                // nil
+                client.print("g\">x</span>");
+              }else{
+                if(bitRead(ShiftOutByte[i], j)==1){
+                  client.print("r");
+                }
+                client.print("\">");
+                // client.print(bitRead(ShiftOutByte[i], j));
+                if(i==2){
+                  client.print(j+1+8);
+                }else{
+                  client.print(j+1);
+                }
+                client.println("</span>");
               }
-              client.print("\">");
-              // client.print(bitRead(ShiftOutByte[i], j));
-              client.print(j+1);
-              client.println("</span>");
             }
             client.println("<br>");
           }
@@ -1000,28 +1325,58 @@ void http(){
           client.print(millis()/1000);
           client.println(F(" s"));
 
-          client.println(F("<form method=\"get\">Source: "));
-          client.print("<input type=\"submit\" name=\"S1\" value=\"Open Interface III\" class=\"");
-          if(TxUdpBuffer[2] == 'o'){
-            client.print("g");
-          }else{
-            client.print("r");
-          }
-          client.print("\"><input type=\"submit\" name=\"S2\" value=\"Band decoder MK2\" class=\"");
-          if(TxUdpBuffer[2] == 'r'){
-            client.print("g");
-          }else{
-            client.print("r");
-          }
-          client.print("\"><input type=\"submit\" name=\"S3\" value=\"Manual IP switch\" class=\"");
-          if(TxUdpBuffer[2] == 'm'){
+          client.println(F("<form method=\"get\">"));
+          client.print("<input type=\"submit\" name=\"S4\" value=\"Multi control\" class=\"");
+          if(EnableGroupPrefix==true){
             client.print("g");
           }else{
             client.print("r");
           }
 
+          // client.print("<input type=\"submit\" name=\"S1\" value=\"Open Interface III\" class=\"");
+          // if(TxUdpBuffer[2] == 'o'){
+          //   client.print("g");
+          // }else{
+          //   client.print("r");
+          // }
+          // client.print("\"><input type=\"submit\" name=\"S2\" value=\"Band decoder MK2\" class=\"");
+          // if(TxUdpBuffer[2] == 'r'){
+          //   client.print("g");
+          // }else{
+          //   client.print("r");
+          // }
+          // client.print("\"><input type=\"submit\" name=\"S3\" value=\"Manual IP switch\" class=\"");
+          // if(TxUdpBuffer[2] == 'm'){
+          //   client.print("g");
+          // }else{
+          //   client.print("r");
+          // }
+
           // <input type="submit" name="S1" value="[ 1 ]" class="r">
-          client.println(F("\"></form><p><a href=\".\" onclick=\"window.open( this.href, this.href, 'width=400,height=180,left=0,top=0,menubar=no,location=no,status=no' ); return false;\" > split&#8599;</a></p>"));
+          client.println(F("\"></form>"));
+
+          if(TxUdpBuffer[2]=='m' && EnableGroupPrefix){
+            client.print("<pre>");
+                  client.println("List detected IP control by NET-ID prefix");
+                  for (int i = 0; i < 16; i++) {
+                    if(DetectedRemoteSw[i][4]!=0){
+                      client.print(i, HEX);
+                      client.print(F("  "));
+                      client.print(DetectedRemoteSw [i] [0]);
+                      client.print(F("."));
+                      client.print(DetectedRemoteSw [i] [1]);
+                      client.print(F("."));
+                      client.print(DetectedRemoteSw [i] [2]);
+                      client.print(F("."));
+                      client.print(DetectedRemoteSw [i] [3]);
+                      client.print(F(":"));
+                      client.println(DetectedRemoteSw [i] [4]);
+                    }
+                  }
+                  client.print("</pre>");
+            }
+
+          client.println(F("<p><a href=\".\" onclick=\"window.open( this.href, this.href, 'width=400,height=180,left=0,top=0,menubar=no,location=no,status=no' ); return false;\" > split&#8599;</a></p>"));
           client.println(F("</body></html>"));
 
           if(EnableSerialDebug==1){
