@@ -31,15 +31,20 @@ Remote USB access
 HARDWARE ESP32-GATEWAY
 
 Changelog:
+2019-04 - group button support (idea TNX SM0MDG)
 2019-03 - multi control support (idea TNX SM0MDG)
 2019-01 - add CLI
         - redesign UDP communications
         - NET-ID prefix/sufix support
-2018-12 - web suport
+2018-12 - add web status page
         - add OTA
 2018-09 - add IP switch support
         - blink LED after DHCP connect and receive sync packet
 2018-08 add Band decoder support
+
+ToDo
+- cli configure first bank button groups
+
 */
 
 //-------------------------------------------------------------------------------------------------------
@@ -50,7 +55,7 @@ Changelog:
 // const char* password = "";
 
 //-------------------------------------------------------------------------------------------------------
-const char* REV = "20190310";
+const char* REV = "20190406";
 // #define EnableOTA                // Enable flashing ESP32 Over The Air
 bool HW_BCD_SW = 0;              // enable hardware ID board bcd switch (disable if not installed)
 int NumberOfEncoderOutputs = 8;  // 2-16
@@ -63,6 +68,8 @@ bool EnableSerialDebug     = 0;
 #define UdpAnswer                // Send UDP answer confirm packet
 int BroadcastPort       = 88;    // destination broadcast packet port
 bool EnableGroupPrefix = 0;      // enable multi controller control
+bool EnableGroupButton = 0;      // group to one from
+unsigned int GroupButton[8]={1,2,3,4,5,6,7,8};
 byte DetectedRemoteSw[16][4];
 unsigned int DetectedRemoteSwPort[16];
 
@@ -81,7 +88,14 @@ int i = 0;
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include "EEPROM.h"
-#define EEPROM_SIZE 5   // 0-listen source, 1-net ID, 2-encoder range, 3-HW_BCD_SW, 4-EnableGroupPrefix
+#define EEPROM_SIZE 14   /*
+0    -listen source
+1    -net ID
+2    -encoder range
+3    -HW_BCD_SW
+4    -EnableGroupPrefix
+5    -EnableGroupButton
+6-13 -GroupButton */
 
 WiFiServer server(HTTP_SERVER_PORT);
 // Client variables
@@ -169,6 +183,20 @@ void setup() {
     EnableGroupPrefix=EEPROM.read(4);
   }
   // Serial.println(EnableGroupPrefix);
+
+  // 5-EnableGroupButton
+  if(EEPROM.read(5)<2){
+    EnableGroupButton=EEPROM.read(5);
+  }
+
+  // 6-13 ButtonGroup
+  if(EnableGroupButton==true){
+    for (int i = 0; i < 8; i++) {
+      if(EEPROM.read(6+i)<9){
+        GroupButton[i]=EEPROM.read(6+i);
+      }
+    }
+  }
 
   // if(EnableSerialDebug==1){
     Serial.println();
@@ -352,6 +380,12 @@ void SerialCLI(){
             }
           // r
           }else if(incomingByte==114){
+            EnableGroupPrefix=false;
+              EEPROM.write(4, EnableGroupPrefix);
+              EEPROM.commit();
+            EnableGroupButton=false;
+              EEPROM.write(5, EnableGroupButton);
+              EEPROM.commit();
             TxUdpBuffer[2] = 'r';
             EEPROM.write(0, 'r'); // address, value
             EEPROM.commit();
@@ -367,6 +401,12 @@ void SerialCLI(){
             }
           // o
           }else if(incomingByte==111){
+            EnableGroupPrefix=false;
+              EEPROM.write(4, EnableGroupPrefix);
+              EEPROM.commit();
+            EnableGroupButton=false;
+              EEPROM.write(5, EnableGroupButton);
+              EEPROM.commit();
             TxUdpBuffer[2] = 'o';
             EEPROM.write(0, 'o'); // address, value
             EEPROM.commit();
@@ -415,6 +455,71 @@ void SerialCLI(){
               TxUdpBuffer[0] = NET_ID;
               Serial.println("[EEPROM]/BCD switch **");
             }
+
+    // %
+    }else if(incomingByte==37){
+        EnableGroupButton=!EnableGroupButton;
+        Serial.print("** Group buttons (one from) [");
+        EEPROM.write(5, EnableGroupButton);
+        EEPROM.commit();
+        if(EnableGroupButton==true){
+          Serial.println("ON] **");
+          for (int i = 0; i < 8; i++) {
+            if(EEPROM.read(6+i)<9){
+              GroupButton[i]=EEPROM.read(6+i);
+            }
+          }
+        }else{
+          Serial.println("OFF] **");
+        }
+
+    // :
+    }else if(incomingByte==58 && EnableGroupButton==true){
+      Serial.println(" List groups");
+      for (int i = 0; i < 8; i++) {
+        Serial.print("  Button ");
+        Serial.print(i+1);
+        Serial.print(" in group ");
+        Serial.println(GroupButton[i]);
+      }
+
+    // !
+    }else if(incomingByte==33 && EnableGroupButton==true){
+          Serial.println("Press button number 1-8...");
+          Serial.print("> ");
+          while (Serial.available() == 0) {
+            // Wait
+          }
+          incomingByte = Serial.read();
+
+          if( (incomingByte>=49 && incomingByte<=56)){
+            unsigned int ButtonNumber=incomingByte-48;
+            Serial.print("Press Group number 1-8 for button ");
+            Serial.print(ButtonNumber);
+            Serial.println(" ...");
+            Serial.print("> ");
+            while (Serial.available() == 0) {
+              // Wait
+            }
+            incomingByte = Serial.read();
+            if( (incomingByte>=49 && incomingByte<=56)){
+              unsigned int ButtonGroup=incomingByte-48;
+              Serial.print(" store Button ");
+              Serial.print(ButtonNumber);
+              Serial.print(" to group ");
+              Serial.println(ButtonGroup);
+              GroupButton[ButtonNumber-1]=ButtonGroup;
+              for (int i = 0; i < 8; i++) {
+                EEPROM.write(6+i, GroupButton[i]);
+              }
+              EEPROM.commit();
+            }else{
+              Serial.println(" accepts 0-8, exit");
+            }
+          }else{
+            Serial.println(" accepts 0-8, exit");
+          }
+
 
       // $
       }else if(incomingByte==36){
@@ -673,21 +778,33 @@ void ListCommands(){
   Serial.println("- Open Interface III");
   Serial.println();
   Serial.println("  or  ?  list status and commands");
-  Serial.print("      /  set encoder range - now [");
-  Serial.print(NumberOfEncoderOutputs+1);
-  Serial.println("]");
-  Serial.print("      *  Serial debug on/off [");
+  if(TxUdpBuffer[2] == 'm'){
+    Serial.print("      /  set encoder range - now [");
+    Serial.print(NumberOfEncoderOutputs+1);
+    Serial.println("]");
+
+    Serial.print("      %  group buttons (select one from group) [");
+    if(EnableGroupButton==true){
+      Serial.println("ON]");
+      Serial.println("         !  SET group buttons");
+      Serial.println("         :  list group buttons");
+    }else{
+      Serial.println("OFF]");
+    }
+  }
+  Serial.print("      *  serial debug on/off [");
     if(EnableSerialDebug==true){
       Serial.println("ON]");
     }else{
       Serial.println("OFF]");
     }
-  Serial.print("      +  Net ID sufix by ");
+  Serial.print("      +  net ID sufix by ");
     if(HW_BCD_SW==true){
       Serial.println("EEPROM/[BCD switch]");
     }else{
       Serial.println("[EEPROM]/BCD switch");
     }
+
   Serial.print("      #  network ID prefix [");
   byte ID = NET_ID;
   bitClear(ID, 0); // ->
@@ -695,10 +812,10 @@ void ListCommands(){
   bitClear(ID, 2);
   bitClear(ID, 3);
   ID = ID >> 4;
-  if(EnableGroupPrefix==false){
-    Serial.print(ID, HEX);
-  }else{
+  if(EnableGroupPrefix==true && TxUdpBuffer[2]=='m'){
     Serial.print("x");
+  }else{
+    Serial.print(ID, HEX);
   }
   Serial.print("] hex");
   if(TxUdpBuffer[2]=='m' && EnableGroupPrefix==true){
@@ -720,7 +837,7 @@ void ListCommands(){
     Serial.println();
   }
   if(TxUdpBuffer[2]=='m'){
-    Serial.print("      $  Group network ID prefix (multi control) [");
+    Serial.print("      $  group network ID prefix (multi control) [");
     if(EnableGroupPrefix==true){
       Serial.println("ON]");
     }else{
@@ -873,14 +990,16 @@ void RX_UDP(){
       && String(packetBuffer[0], DEC).toInt()==NET_ID
       && packetBuffer[1]==TxUdpBuffer[2]  // FROM Switch
       && packetBuffer[2]== 's'  // TO
-      && packetBuffer[3]== ':'
+      && packetBuffer[3]== B00000000
+      // && packetBuffer[3]== ':'
       && packetBuffer[7]== ';')
       ||
       (EnableGroupPrefix==true
       && IdSufix(packetBuffer[0])==IdSufix(NET_ID)
       && packetBuffer[1]==TxUdpBuffer[2]  // FROM Switch
       && packetBuffer[2]== 's'  // TO
-      && packetBuffer[3]== ':'
+      && packetBuffer[3]== B00000000
+      // && packetBuffer[3]== ':'
       && packetBuffer[7]== ';')
     ){
 
@@ -945,9 +1064,13 @@ void RX_UDP(){
 
       // RX DATA
       }else{
-        ShiftOutByte[2] = String(packetBuffer[6], DEC).toInt();    // Bank2
+        if(EnableGroupButton==true){
+          CheckGroup();
+        }else{
+          ShiftOutByte[0] = String(packetBuffer[4], DEC).toInt();    // Bank0
+        }
         ShiftOutByte[1] = String(packetBuffer[5], DEC).toInt();    // Bank1
-        ShiftOutByte[0] = String(packetBuffer[4], DEC).toInt();    // Bank0
+        ShiftOutByte[2] = String(packetBuffer[6], DEC).toInt();    // Bank2
 
         // SHIFT OUT
         #if defined(ShiftOut)
@@ -974,7 +1097,6 @@ void RX_UDP(){
           Serial.print(UdpCommand.remoteIP());
           Serial.print(F(":"));
           Serial.println(UdpCommand.remotePort());
-
         }
         if(UdpCommand.remotePort() != DetectedRemoteSwPort[hexToDecBy4bit(IdPrefix(packetBuffer[0]))]){
           // if(EnableSerialDebug==1){
@@ -1001,6 +1123,39 @@ void RX_UDP(){
 }
 //-------------------------------------------------------------------------------------------------------
 
+void CheckGroup(){
+  int ChangeBit=9;
+  int NumberOfChange=0;
+  for (int i=0; i<8; i++){
+    if(bitRead(packetBuffer[4], i)!=bitRead(ShiftOutByte[0], i)){
+      ChangeBit=i;
+      NumberOfChange++;
+    }
+  }
+  // Serial.print("ChangeBit|NumberOfChange ");
+  // Serial.print(ChangeBit+1);
+  // Serial.print(" ");
+  // Serial.println(NumberOfChange);
+
+  ShiftOutByte[0] = String(packetBuffer[4], DEC).toInt();    // Bank0
+  if(NumberOfChange==1){
+    // Serial.println("clearGroup");
+    NumberOfChange=0;
+    for (int i=0; i<8; i++){
+      if(GroupButton[ChangeBit]==GroupButton[i] && ChangeBit!=i){
+        bitClear(ShiftOutByte[0], i);
+        NumberOfChange++;
+        // Serial.print("Bitclear ");
+        // Serial.println(i);
+      }
+    }
+    if(NumberOfChange>0){
+      bitSet(ShiftOutByte[0], ChangeBit);
+    }
+  }
+}
+//-------------------------------------------------------------------------------------------------------
+
 unsigned char hexToDecBy4bit(unsigned char hex)
 // convert a character representation of a hexidecimal digit into the actual hexidecimal value
 {
@@ -1015,11 +1170,23 @@ void TxUDP(byte FROM, byte TO, byte A, byte B, byte C, int DIRECT){
   // TxUdpBuffer[0] = NET_ID;
   TxUdpBuffer[1] = FROM;
   // TxUdpBuffer[2] = TO;
-  if(TxUdpBuffer[2]=='m' && EnableGroupPrefix==true){
-    TxUdpBuffer[3] = B00101101;           // -  multi control
-  }else{
-    TxUdpBuffer[3] = B00111010;           // :
-  }
+
+  // if(TxUdpBuffer[2]=='m' && ( EnableGroupPrefix==true || EnableGroupButton==true ) ){
+  //   TxUdpBuffer[3] = B00101101;           // -  multi control || GroupButton
+  // }else{
+  //   TxUdpBuffer[3] = B00111010;           // :
+  // }
+
+  TxUdpBuffer[3] = B00000000;
+    // multi control
+    if(TxUdpBuffer[2]=='m' && EnableGroupPrefix==true){
+      bitSet(TxUdpBuffer[3], 0);
+    }
+    // group button
+    if(TxUdpBuffer[2]=='m' && EnableGroupButton==true){
+      bitSet(TxUdpBuffer[3], 1);
+    }
+
   TxUdpBuffer[4] = A;
   TxUdpBuffer[5] = B;
   TxUdpBuffer[6] = C;
@@ -1069,9 +1236,11 @@ void TxUDP(byte FROM, byte TO, byte A, byte B, byte C, int DIRECT){
     UdpCommand.endPacket();
     if(EnableSerialDebug==1){
       Serial.print(TxUdpBuffer[0], HEX);
-      for (int i=1; i<4; i++){
-        Serial.print(char(TxUdpBuffer[i]));
-      }
+      Serial.print(char(TxUdpBuffer[1]));
+      Serial.print(char(TxUdpBuffer[2]));
+      Serial.print(F("|"));
+      Serial.print(TxUdpBuffer[3], BIN);
+      Serial.print(F("|"));
       Serial.print(TxUdpBuffer[4], BIN);
       Serial.print(F("|"));
       Serial.print(TxUdpBuffer[5], BIN);
@@ -1321,6 +1490,9 @@ void http(){
 
           // client.println("<h1>RemoteSwitch </h1>");
           client.println("<p>Output status<br>");
+          if( EnableGroupButton==true){
+            client.print(" (Group buttons ENABLE)<br>");
+          }
           for (i = 0; i < 3; i++) {
             client.print("Bank ");
             client.print(i+1);
@@ -1341,7 +1513,21 @@ void http(){
                 }else{
                   client.print(j+1);
                 }
+                // Group button
+                if(i==0 && EnableGroupButton==true){
+                  client.print(" group");
+                  client.print(GroupButton[j]);
+                }
+
                 client.println("</span>");
+
+                // button break
+                if(i==0 && j==3){
+                  client.println("<br>");
+                  client.print("Bank ");
+                  client.print(i+1);
+                  client.print(" ");
+                }
               }
             }
             client.println("<br>");
@@ -1373,39 +1559,47 @@ void http(){
           client.print(F(REV));
           client.print(F(" | Uptime: "));
           client.print(millis()/1000);
-          client.println(F(" s"));
+          client.println(F(" s<br>Source: "));
 
-          client.println(F("<form method=\"get\">"));
-          client.print("<input type=\"submit\" name=\"S4\" value=\"Multi control\" class=\"");
-          if(EnableGroupPrefix==true){
-            client.print("g");
-          }else{
-            client.print("r");
+          if(TxUdpBuffer[2] == 'o'){
+            client.println("Open Interface III");
+          }else if(TxUdpBuffer[2] == 'r'){
+            client.println("Band decoder MK2");
+          }else if(TxUdpBuffer[2] == 'm'){
+            client.println("Manual IP switch MK2");
           }
 
-          // client.print("<input type=\"submit\" name=\"S1\" value=\"Open Interface III\" class=\"");
-          // if(TxUdpBuffer[2] == 'o'){
-          //   client.print("g");
-          // }else{
-          //   client.print("r");
-          // }
-          // client.print("\"><input type=\"submit\" name=\"S2\" value=\"Band decoder MK2\" class=\"");
-          // if(TxUdpBuffer[2] == 'r'){
-          //   client.print("g");
-          // }else{
-          //   client.print("r");
-          // }
-          // client.print("\"><input type=\"submit\" name=\"S3\" value=\"Manual IP switch\" class=\"");
-          // if(TxUdpBuffer[2] == 'm'){
-          //   client.print("g");
-          // }else{
-          //   client.print("r");
-          // }
-
-          // <input type="submit" name="S1" value="[ 1 ]" class="r">
-          client.println(F("\"></form>"));
-
           if(TxUdpBuffer[2]=='m' && EnableGroupPrefix){
+            client.println(F("<form method=\"get\">"));
+            client.print("<input type=\"submit\" name=\"S4\" value=\"Multi control\" class=\"");
+            if(EnableGroupPrefix==true){
+              client.print("g");
+            }else{
+              client.print("r");
+            }
+
+            // client.print("<input type=\"submit\" name=\"S1\" value=\"Open Interface III\" class=\"");
+            // if(TxUdpBuffer[2] == 'o'){
+            //   client.print("g");
+            // }else{
+            //   client.print("r");
+            // }
+            // client.print("\"><input type=\"submit\" name=\"S2\" value=\"Band decoder MK2\" class=\"");
+            // if(TxUdpBuffer[2] == 'r'){
+            //   client.print("g");
+            // }else{
+            //   client.print("r");
+            // }
+            // client.print("\"><input type=\"submit\" name=\"S3\" value=\"Manual IP switch\" class=\"");
+            // if(TxUdpBuffer[2] == 'm'){
+            //   client.print("g");
+            // }else{
+            //   client.print("r");
+            // }
+
+            // <input type="submit" name="S1" value="[ 1 ]" class="r">
+            client.println(F("\"></form>"));
+
             client.print("<pre>");
                   client.println("List detected IP control by NET-ID prefix");
                   for (int i = 0; i < 16; i++) {
