@@ -431,6 +431,13 @@ void SerialCLI(){
               Serial.println("DISABLE **");
             }
 
+        // &
+        }else if(incomingByte==38){
+          TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
+          if(TxUdpBuffer[2] == 'm'){
+            TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
+          }
+
           // @
         }else if(incomingByte==64){
             Serial.print("** IP switch will be restarted **");
@@ -847,6 +854,7 @@ void ListCommands(){
   if(TxUdpBuffer[2]=='m' && EnableGroupPrefix==true){
     Serial.println("      .  list detected IP switch (multi control)");
   }
+  Serial.println("      &  send broadcast packet");
   Serial.println("      @  restart IP switch");
   Serial.println("---------------------------------------------");
 }
