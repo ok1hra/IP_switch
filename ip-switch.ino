@@ -46,6 +46,8 @@ Changelog:
         - blink LED after DHCP connect and receive sync packet
 2018-08 add Band decoder support
 
+ToDo
+- telnet inactivity watchdog > close
 */
 //-------------------------------------------------------------------------------------------------------
 
@@ -55,12 +57,14 @@ Changelog:
 // const char* password = "";
 
 const int keyNumber = 0;
+// How to generate new key
+// cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 100 | head -n 1
 const char* key="yWW3aaxjXua4wcoXUjkkOiAwChRwaUakVIfAUmmHV4ylwIXvN6Ucy3oH25T5ZzNYQ2r0L4s42tZIJT9XIgt9VVYxnDWtM7AVN6D8";
 
 //-------------------------------------------------------------------------------------------------------
-const char* REV = "20190610";
-#define Ser2net                  // Serial to ip proxy - DISABLE if board revision 0.3 or lower
-// #define EnableOTA                // Enable flashing ESP32 Over The Air
+const char* REV = "20190612";
+// #define Ser2net                  // Serial to ip proxy - DISABLE if board revision 0.3 or lower
+#define EnableOTA                // Enable flashing ESP32 Over The Air
 bool HW_BCD_SW = 0;              // enable hardware ID board bcd switch (disable if not installed)
 int NumberOfEncoderOutputs = 8;  // 2-16
 long HW_BCD_SWTimer[2]{0,3000};
@@ -140,7 +144,7 @@ String HTTP_req;
   HardwareSerial Serial_one(1);
   #if defined(ShiftOut)
     const int ShiftOutDataPin = 32;
-    const int ShiftOutLatchPin = 35;
+    const int ShiftOutLatchPin = 35;  // Input only
     const int ShiftOutClockPin = 5;
     byte ShiftOutByte[3];
   #endif
@@ -227,14 +231,18 @@ void setup() {
     NumberOfEncoderOutputs=8;
   }
 
-  // 3-HW_BCD_SW
-  Serial.print("HW BCD on/off ");
-  if(EEPROM.read(3)<2){
-    HW_BCD_SW = EEPROM.read(3);
-    Serial.println("read from EEPROM");
-  }else{
-    Serial.println("set to OFF");
-  }
+  #if defined(Ser2net)
+    HW_BCD_SW = 0;
+  #else
+    // 3-HW_BCD_SW
+    Serial.print("HW BCD on/off ");
+    if(EEPROM.read(3)<2){
+      HW_BCD_SW = EEPROM.read(3);
+      Serial.println("read from EEPROM");
+    }else{
+      Serial.println("set to OFF");
+    }
+  #endif
 
   // 4-EnableGroupPrefix
   // Serial.print("Enable group NET-ID prefix ");
@@ -368,7 +376,7 @@ void setup() {
     StringHostname.toCharArray(copy, 13);
 
     ArduinoOTA.setHostname(copy);
-    // ArduinoOTA.setPassword("remoteqth");
+    ArduinoOTA.setPassword("remoteqth");
     // $ echo password | md5sum
     // ArduinoOTA.setPasswordHash("5587ba7a03b12a409ee5830cea97e079");
     ArduinoOTA
@@ -402,10 +410,10 @@ void setup() {
 
   #if defined(Ser2net)
     Serial_one.begin(SERIAL1_BAUDRATE, SERIAL_8N1, RX1, TX1);
-  #endif
   // Serial2.begin(9600);
   SerialServer.begin(SerialServerIPport);
   SerialServer.setNoDelay(true);
+  #endif
 
   TelnetServer.begin(TelnetServerIPport);
   // TelnetlServer.setNoDelay(true);
@@ -524,176 +532,185 @@ void CLI(){
         OUT=1;
       }
     }
+  }else if(!TelnetServerClients[0].connected()){
+    TelnetAuthStep=0;
   }
-    // for(i = 0; i < MAX_SRV_CLIENTS; i++){
-    //   if (TelnetServerClients[i] && TelnetServerClients[i].connected()){
-    //     if(TelnetServerClients[i].available()){
-    //       //get data from the telnet client and push it to the UART
-    //       // while(TelnetServerClients[i].available()) Serial_one.write(TelnetServerClients[i].read());
-    //       OUT = 1;
-    //       if(EnableSerialDebug==1){
-    //         Serial.println();
-    //         Serial.print("Telnet rx-");
-    //       }
-    //
-    //       while(TelnetServerClients[i].available()){
-    //         incomingByte=TelnetServerClients[i].read();
-    //         if(EnableSerialDebug==1){
-    //           Serial.print(incomingByte, HEX);
-    //         }
-    //       }
-    //     }
-    //   }else{
-    //     if (TelnetServerClients[i]) {
-    //       TelnetServerClients[i].stop();
-    //     }
-    //   }
-    // }
-  // }
 
   if(OUT<2){
-          // m
-          if(incomingByte==109){
-            TxUdpBuffer[2] = 'm';
-            EEPROM.write(0, 'm'); // address, value
-            EEPROM.commit();
-            Prn(OUT, 1,"Now control from: IP switch master");
-            if(EnableSerialDebug==1){
-              Prn(OUT, 0,"EEPROM read [");
-              Prn(OUT, 0, String(EEPROM.read(0)) );
-              Prn(OUT, 1,"]");
-            }
-            TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
-            if(TxUdpBuffer[2] == 'm'){
-              TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
-            }
-          // r
-          }else if(incomingByte==114){
-            EnableGroupPrefix=false;
-              EEPROM.write(4, EnableGroupPrefix);
-              EEPROM.commit();
-            EnableGroupButton=false;
-              EEPROM.write(5, EnableGroupButton);
-              EEPROM.commit();
-            TxUdpBuffer[2] = 'r';
-            EEPROM.write(0, 'r'); // address, value
-            EEPROM.commit();
-            Prn(OUT, 1,"Now control from: Band decoder");
-            if(EnableSerialDebug==1){
-              Prn(OUT, 0,"EEPROM read [");
-              Prn(OUT, 0, String(EEPROM.read(0)) );
-              Prn(OUT, 1,"]");
-            }
-            TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
-            if(TxUdpBuffer[2] == 'm'){
-              TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
-            }
-          // o
-          }else if(incomingByte==111){
-            EnableGroupPrefix=false;
-              EEPROM.write(4, EnableGroupPrefix);
-              EEPROM.commit();
-            EnableGroupButton=false;
-              EEPROM.write(5, EnableGroupButton);
-              EEPROM.commit();
-            TxUdpBuffer[2] = 'o';
-            EEPROM.write(0, 'o'); // address, value
-            EEPROM.commit();
-            Prn(OUT, 1,"Now control from: Open Interface III");
-            if(EnableSerialDebug==1){
-              Prn(OUT, 0,"EEPROM read [");
-              Prn(OUT, 0, String(EEPROM.read(0)) );
-              Prn(OUT, 1,"]");
-            }
-            TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
-            if(TxUdpBuffer[2] == 'm'){
-              TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
-            }
-          // n
-        }else if(incomingByte==110){
-            EnableGroupPrefix=false;
-            EEPROM.write(4, EnableGroupPrefix);
-            EnableGroupButton=false;
-            EEPROM.write(5, EnableGroupButton);
-            TxUdpBuffer[2] = 'n';
-            EEPROM.write(0, 'n'); // address, value
-            EEPROM.commit();
-            Prn(OUT, 1,"Now control from: none");
+    // m
+    if(incomingByte==109){
+      TxUdpBuffer[2] = 'm';
+      EEPROM.write(0, 'm'); // address, value
+      EEPROM.commit();
+      Prn(OUT, 1,"Now control from: IP switch master");
+      if(EnableSerialDebug==1){
+        Prn(OUT, 0,"EEPROM read [");
+        Prn(OUT, 0, String(EEPROM.read(0)) );
+        Prn(OUT, 1,"]");
+      }
+      TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
+      if(TxUdpBuffer[2] == 'm'){
+        TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
+      }
 
-          // *
-          }else if(incomingByte==42){
-            EnableSerialDebug=!EnableSerialDebug;
-            Prn(OUT, 0,"** Serial DEBUG ");
-            if(EnableSerialDebug==true){
-              Prn(OUT, 1,"ENABLE **");
-            }else{
-              Prn(OUT, 1,"DISABLE **");
-            }
+    // r
+    }else if(incomingByte==114){
+      EnableGroupPrefix=false;
+        EEPROM.write(4, EnableGroupPrefix);
+        EEPROM.commit();
+      EnableGroupButton=false;
+        EEPROM.write(5, EnableGroupButton);
+        EEPROM.commit();
+      TxUdpBuffer[2] = 'r';
+      EEPROM.write(0, 'r'); // address, value
+      EEPROM.commit();
+      Prn(OUT, 1,"Now control from: Band decoder");
+      if(EnableSerialDebug==1){
+        Prn(OUT, 0,"EEPROM read [");
+        Prn(OUT, 0, String(EEPROM.read(0)) );
+        Prn(OUT, 1,"]");
+      }
+      TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
+      if(TxUdpBuffer[2] == 'm'){
+        TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
+      }
 
-        // &
-        }else if(incomingByte==38 && TxUdpBuffer[2]!='n'){
-          TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
-          if(TxUdpBuffer[2] == 'm'){
-            TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
-          }
+    // o
+    }else if(incomingByte==111){
+      EnableGroupPrefix=false;
+        EEPROM.write(4, EnableGroupPrefix);
+        EEPROM.commit();
+      EnableGroupButton=false;
+        EEPROM.write(5, EnableGroupButton);
+        EEPROM.commit();
+      TxUdpBuffer[2] = 'o';
+      EEPROM.write(0, 'o'); // address, value
+      EEPROM.commit();
+      Prn(OUT, 1,"Now control from: Open Interface III");
+      if(EnableSerialDebug==1){
+        Prn(OUT, 0,"EEPROM read [");
+        Prn(OUT, 0, String(EEPROM.read(0)) );
+        Prn(OUT, 1,"]");
+      }
+      TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
+      if(TxUdpBuffer[2] == 'm'){
+        TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
+      }
 
-          // @
-        }else if(incomingByte==64){
-            Prn(OUT, 1,"** IP switch will be restarted **");
-            if(RebootWatchdog > 0){
-              Prn(OUT, 1,"   Activate reboot watchdog - store outputs to EEPROM...");
-              EEPROM.writeByte(34, ShiftOutByte[0]);
-              EEPROM.writeByte(35, ShiftOutByte[1]);
-              EEPROM.writeByte(36, ShiftOutByte[2]);
-              EEPROM.commit();
-              delay(1000);
-            }
-            TelnetServerClients[0].stop();
-            ESP.restart();
+    // n
+    }else if(incomingByte==110){
+      EnableGroupPrefix=false;
+      EEPROM.write(4, EnableGroupPrefix);
+      EnableGroupButton=false;
+      EEPROM.write(5, EnableGroupButton);
+      TxUdpBuffer[2] = 'n';
+      EEPROM.write(0, 'n'); // address, value
+      EEPROM.commit();
+      Prn(OUT, 1,"Now control from: none");
 
-          // q
-        }else if(incomingByte==113 && TelnetServerClients[0].connected() ){
-          TelnetServerClients[0].stop();
-          TelnetAuthorized=false;
-          // TelnetServerClientAuth = {0,0,0,0};
-          TelnetAuthStep=0;
+    // ?
+    }else if(incomingByte==63){
+      ListCommands(OUT);
 
-        // +
-      }else if(incomingByte==43 && TxUdpBuffer[2]!='n'){
-            HW_BCD_SW=!HW_BCD_SW;
-            Prn(OUT, 0,"** Net ID sufix by ");
-            EEPROM.write(3, HW_BCD_SW);
-            EEPROM.commit();
-            if(HW_BCD_SW==true){
-              Prn(OUT, 1,"EEPROM/[BCD switch] **");
-              bitClear(NET_ID, 0);
-              bitClear(NET_ID, 1);
-              bitClear(NET_ID, 2);
-              bitClear(NET_ID, 3);
-              NET_ID = NET_ID | GetBoardId();
-              TxUdpBuffer[0] = NET_ID;
-            }else{
-              NET_ID = EEPROM.read(1);
-              TxUdpBuffer[0] = NET_ID;
-              Prn(OUT, 1,"[EEPROM]/BCD switch **");
-            }
+    // w
+    }else if(incomingByte==119 && TxUdpBuffer[2]!='n'){
+      Prn(OUT, 1,"Write reboot watchdog in minutes (0-10080), 0-disable");
+      Prn(OUT, 1,"recomended 1440 (1 day)");
+      EnterInt(OUT);
+      if(CompareInt>=0 && CompareInt<=10080){
+        RebootWatchdog = CompareInt;
+        EEPROM.writeUInt(26, RebootWatchdog);
+        EEPROM.commit();
+        Prn(OUT, 0," Set ");
+        Prn(OUT, 0, String(EEPROM.readUInt(26)) );
+        Prn(OUT, 1," minutes");
+      }else{
+        Prn(OUT, 0,"Out of range.");
+      }
+
+    // W
+    }else if(incomingByte==87 && TxUdpBuffer[2]!='n'){
+      Prn(OUT, 1,"Write clear output watchdog in minutes (0-10080), 0-disable");
+      Prn(OUT, 1,"note: if you need clear output after reboot watchdog, set smaller than it");
+      EnterInt(OUT);
+      if(CompareInt>=0 && CompareInt<=10080){
+        OutputWatchdog = CompareInt;
+        EEPROM.writeUInt(30, OutputWatchdog);
+        EEPROM.commit();
+        Prn(OUT, 0," Set ");
+        Prn(OUT, 0, String(EEPROM.readUInt(30)) );
+        Prn(OUT, 1," minutes");
+      }else{
+        Prn(OUT, 0,"Out of range.");
+      }
+
+    // <
+    }else if(incomingByte==60 && TxUdpBuffer[2]!='n'){
+      Prn(OUT, 1,"write UDP port (1-65535)");
+      EnterInt(OUT);
+      if(CompareInt>=1 && CompareInt<=65535){
+        IncomingSwitchUdpPort = CompareInt;
+        EEPROM.writeInt(22, IncomingSwitchUdpPort);
+        EEPROM.commit();
+        Prn(OUT, 0," Set ");
+        Prn(OUT, 1, String(IncomingSwitchUdpPort) );
+        Prn(OUT, 0,"** device will be restarted **");
+        delay(1000);
+        TelnetServerClients[0].stop();
+        ESP.restart();
+      }else{
+        Prn(OUT, 0,"Out of range.");
+      }
+
+    // /
+    }else if(incomingByte==47 && TxUdpBuffer[2] == 'm'){
+      Prn(OUT, 1,"write encoder rannge number (2-16)");
+      EnterInt(OUT);
+      if(CompareInt>=2 && CompareInt<=16){
+        NumberOfEncoderOutputs = CompareInt;
+/*      EnterChar(OUT);
+      // 2-G
+      if( (incomingByte>=50 && incomingByte<=57) || (incomingByte>=97 && incomingByte<=103) ){
+        if(incomingByte>=50 && incomingByte<=57){
+          NumberOfEncoderOutputs = incomingByte-48;
+        }else if(incomingByte>=97 && incomingByte<=103){
+          NumberOfEncoderOutputs = incomingByte-87;
+        }*/
+        NumberOfEncoderOutputs--;
+        EEPROM.write(2, NumberOfEncoderOutputs); // address, value
+        EEPROM.commit();
+        Prn(OUT, 0,"** Now Encoder range change to ");
+        Prn(OUT, 0, String(NumberOfEncoderOutputs+1) );
+        Prn(OUT, 1," **");
+        if(EnableSerialDebug==1){
+          Prn(OUT, 0,"EEPROM read [");
+          Prn(OUT, 0, String(EEPROM.read(2)) );
+          Prn(OUT, 1,"]");
+        }
+        TxUDP('s', packetBuffer[2], 'c', 'f', 'm', 1);    // 0=broadcast, 1= direct to RX IP
+        if(TxUdpBuffer[2] == 'm'){
+          TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
+        }
+      }else{
+        Prn(OUT, 1,"Out of range");
+      }
 
     // %
     }else if(incomingByte==37){
-        EnableGroupButton=!EnableGroupButton;
-        Prn(OUT, 0,"** Group buttons (one from) [");
-        EEPROM.write(5, EnableGroupButton);
-        EEPROM.commit();
-        if(EnableGroupButton==true){
-          Prn(OUT, 1,"ON] **");
-          for (int i = 0; i < 8; i++) {
-            if(EEPROM.read(6+i)<9){
-              GroupButton[i]=EEPROM.read(6+i);
-            }
+      EnableGroupButton=!EnableGroupButton;
+      Prn(OUT, 0,"** Group buttons (one from) [");
+      EEPROM.write(5, EnableGroupButton);
+      EEPROM.commit();
+      if(EnableGroupButton==true){
+        Prn(OUT, 1,"ON] **");
+        for (int i = 0; i < 8; i++) {
+          if(EEPROM.read(6+i)<9){
+            GroupButton[i]=EEPROM.read(6+i);
           }
-        }else{
-          Prn(OUT, 1,"OFF] **");
         }
+      }else{
+        Prn(OUT, 1,"OFF] **");
+      }
 
     // :
     }else if(incomingByte==58 && EnableGroupButton==true){
@@ -707,389 +724,366 @@ void CLI(){
 
     // !
     }else if(incomingByte==33 && EnableGroupButton==true){
-          Prn(OUT, 1,"Press button number 1-8...");
-          Prn(OUT, 0,"> ");
-          while (Serial.available() == 0) {
-            // Wait
+      Prn(OUT, 1,"Press button number 1-8...");
+      EnterChar(OUT);
+      if( (incomingByte>=49 && incomingByte<=56)){
+        unsigned int ButtonNumber=incomingByte-48;
+        Prn(OUT, 0,"Press Group number 1-8 for button ");
+        Prn(OUT, 1, String(ButtonNumber) );
+        EnterChar(OUT);
+        if( (incomingByte>=49 && incomingByte<=56)){
+          unsigned int ButtonGroup=incomingByte-48;
+          Prn(OUT, 0," store Button ");
+          Prn(OUT, 0, String(ButtonNumber) );
+          Prn(OUT, 0," to group ");
+          Prn(OUT, 1, String(ButtonGroup) );
+          GroupButton[ButtonNumber-1]=ButtonGroup;
+          for (int i = 0; i < 8; i++) {
+            EEPROM.write(6+i, GroupButton[i]);
           }
-          incomingByte = Serial.read();
+          EEPROM.commit();
+        }else{
+          Prn(OUT, 1," accepts 0-8, exit");
+        }
+      }else{
+        Prn(OUT, 1," accepts 0-8, exit");
+      }
 
-          if( (incomingByte>=49 && incomingByte<=56)){
-            unsigned int ButtonNumber=incomingByte-48;
-            Prn(OUT, 0,"Press Group number 1-8 for button ");
-            Prn(OUT, 0, String(ButtonNumber) );
-            Prn(OUT, 1," ...");
-            Prn(OUT, 0,"> ");
-            while (Serial.available() == 0) {
-              // Wait
-            }
-            incomingByte = Serial.read();
-            if( (incomingByte>=49 && incomingByte<=56)){
-              unsigned int ButtonGroup=incomingByte-48;
-              Prn(OUT, 0," store Button ");
-              Prn(OUT, 0, String(ButtonNumber) );
-              Prn(OUT, 0," to group ");
-              Prn(OUT, 1, String(ButtonGroup) );
-              GroupButton[ButtonNumber-1]=ButtonGroup;
-              for (int i = 0; i < 8; i++) {
-                EEPROM.write(6+i, GroupButton[i]);
-              }
-              EEPROM.commit();
-            }else{
-              Prn(OUT, 1," accepts 0-8, exit");
-            }
-          }else{
-            Prn(OUT, 1," accepts 0-8, exit");
+    // *
+    }else if(incomingByte==42){
+      EnableSerialDebug=!EnableSerialDebug;
+      Prn(OUT, 0,"** Serial DEBUG ");
+      if(EnableSerialDebug==true){
+        Prn(OUT, 1,"ENABLE **");
+      }else{
+        Prn(OUT, 1,"DISABLE **");
+      }
+
+    // +
+    #if !defined(Ser2net)
+    }else if(incomingByte==43 && TxUdpBuffer[2]!='n'){
+      HW_BCD_SW=!HW_BCD_SW;
+      Prn(OUT, 0,"** Net ID sufix by ");
+      EEPROM.write(3, HW_BCD_SW);
+      EEPROM.commit();
+      if(HW_BCD_SW==true){
+        Prn(OUT, 1,"EEPROM/[BCD switch] **");
+        bitClear(NET_ID, 0);
+        bitClear(NET_ID, 1);
+        bitClear(NET_ID, 2);
+        bitClear(NET_ID, 3);
+        NET_ID = NET_ID | GetBoardId();
+        TxUdpBuffer[0] = NET_ID;
+      }else{
+        NET_ID = EEPROM.read(1);
+        TxUdpBuffer[0] = NET_ID;
+        Prn(OUT, 1,"[EEPROM]/BCD switch **");
+      }
+    #endif
+
+    // #
+    }else if(incomingByte==35 && TxUdpBuffer[2]!='n'){
+      if(EnableGroupPrefix==false){
+        Prn(OUT, 1,"Press NET-ID X_ prefix 0-f...");
+      }else{
+        Prn(OUT, 1,"Press NET-ID _X sufix 0-f...");
+      }
+      EnterChar(OUT);
+      if( (incomingByte>=48 && incomingByte<=57) || (incomingByte>=97 && incomingByte<=102) ){
+        // prefix
+        if(EnableGroupPrefix==false){
+          bitClear(NET_ID, 4);
+          bitClear(NET_ID, 5);
+          bitClear(NET_ID, 6);
+          bitClear(NET_ID, 7);
+          Serial.write(incomingByte);
+          Prn(OUT, 1,"");
+          if(incomingByte>=48 && incomingByte<=57){
+            incomingByte = incomingByte-48;
+            incomingByte = (byte)incomingByte << 4;
+            NET_ID = NET_ID | incomingByte;
+            TxUdpBuffer[0] = NET_ID;
+          }else if(incomingByte>=97 && incomingByte<=102){
+            incomingByte = incomingByte-87;
+            incomingByte = (byte)incomingByte << 4;
+            NET_ID = NET_ID | incomingByte;
+            TxUdpBuffer[0] = NET_ID;
           }
-
-
-      // $
-      }else if(incomingByte==36){
-            EnableGroupPrefix=!EnableGroupPrefix;
-            Prn(OUT, 0,"** Group sufix (multi control) [");
-            EEPROM.write(4, EnableGroupPrefix);
-            EEPROM.commit();
-            if(EnableGroupPrefix==true){
-              Prn(OUT, 1,"ON] **");
-            }else{
-              Prn(OUT, 1,"OFF] **");
-            }
-            if(EnableGroupPrefix==true){
-              // clear prefix
-              bitClear(NET_ID, 4);
-              bitClear(NET_ID, 5);
-              bitClear(NET_ID, 6);
-              bitClear(NET_ID, 7); // <-
-            }
-            Prn(OUT, 1,"** IP switch will be restarted **");
-            delay(1000);
-            TelnetServerClients[0].stop();
-            ESP.restart();
-
-      // #
-      }else if(incomingByte==35 && TxUdpBuffer[2]!='n'){
+        }
+        // sufix
+        if(HW_BCD_SW==false){
           if(EnableGroupPrefix==false){
-            Prn(OUT, 1,"Press NET-ID X_ prefix 0-f...");
-          }else{
             Prn(OUT, 1,"Press NET-ID _X sufix 0-f...");
+            EnterChar(OUT);
           }
-          Prn(OUT, 0,"> ");
-          while (Serial.available() == 0) {
-            // Wait
-          }
-          incomingByte = Serial.read();
-
           if( (incomingByte>=48 && incomingByte<=57) || (incomingByte>=97 && incomingByte<=102) ){
-            // prefix
-            if(EnableGroupPrefix==false){
-              bitClear(NET_ID, 4);
-              bitClear(NET_ID, 5);
-              bitClear(NET_ID, 6);
-              bitClear(NET_ID, 7);
-              Serial.write(incomingByte);
-              Prn(OUT, 1,"");
-              if(incomingByte>=48 && incomingByte<=57){
-                incomingByte = incomingByte-48;
-                incomingByte = (byte)incomingByte << 4;
-                NET_ID = NET_ID | incomingByte;
-                TxUdpBuffer[0] = NET_ID;
-              }else if(incomingByte>=97 && incomingByte<=102){
-                incomingByte = incomingByte-87;
-                incomingByte = (byte)incomingByte << 4;
-                NET_ID = NET_ID | incomingByte;
-                TxUdpBuffer[0] = NET_ID;
-              }
+            bitClear(NET_ID, 0);
+            bitClear(NET_ID, 1);
+            bitClear(NET_ID, 2);
+            bitClear(NET_ID, 3);
+            Serial.write(incomingByte);
+            Prn(OUT, 1, "");
+            if(incomingByte>=48 && incomingByte<=57){
+              incomingByte = incomingByte-48;
+              NET_ID = NET_ID | incomingByte;
+              TxUdpBuffer[0] = NET_ID;
+            }else if(incomingByte>=97 && incomingByte<=102){
+              incomingByte = incomingByte-87;
+              NET_ID = NET_ID | incomingByte;
+              TxUdpBuffer[0] = NET_ID;
             }
-            // sufix
-            if(HW_BCD_SW==false){
-              if(EnableGroupPrefix==false){
-                Prn(OUT, 1,"Press NET-ID _X sufix 0-f...");
-                Prn(OUT, 0,"> ");
-                while (Serial.available() == 0) {
-                  // Wait
-                }
-                incomingByte = Serial.read();
-              }
-              if( (incomingByte>=48 && incomingByte<=57) || (incomingByte>=97 && incomingByte<=102) ){
-                bitClear(NET_ID, 0);
-                bitClear(NET_ID, 1);
-                bitClear(NET_ID, 2);
-                bitClear(NET_ID, 3);
-                Serial.write(incomingByte);
-                Prn(OUT, 1, "");
-                if(incomingByte>=48 && incomingByte<=57){
-                  incomingByte = incomingByte-48;
-                  NET_ID = NET_ID | incomingByte;
-                  TxUdpBuffer[0] = NET_ID;
-                }else if(incomingByte>=97 && incomingByte<=102){
-                  incomingByte = incomingByte-87;
-                  NET_ID = NET_ID | incomingByte;
-                  TxUdpBuffer[0] = NET_ID;
-                }
-            // #endif
-                EEPROM.write(1, NET_ID); // address, value
-                EEPROM.commit();
-                Prn(OUT, 0,"** Now NET-ID change to 0x");
-                if(NET_ID <=0x0f){
-                  Prn(OUT, 0, String("0"));
-                }
-                Prn(OUT, 0, String(NET_ID, HEX) );
-                Prn(OUT, 1," **");
-                if(EnableSerialDebug==1){
-                  Prn(OUT, 0,"EEPROM read [");
-                  Prn(OUT, 0, String(EEPROM.read(1), HEX) );
-                  Prn(OUT, 1,"]");
-                }
-                TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
-                if(TxUdpBuffer[2] == 'm'){
-                  TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
-                }
-            // #if !defined(HW_BCD_SW)
-              }else{
-                Prn(OUT, 1," accepts 0-f, exit");
-              }
-            // #endif
-            }
-          }else{
-            Prn(OUT, 1," accepts 0-f, exit");
-          }
-
-      // .
-    }else if(incomingByte==46 && TxUdpBuffer[2]=='m' && EnableGroupPrefix){
-            Prn(OUT, 1,"List detected IP switch by NET-ID prefix (multi control)");
-            for (int i = 0; i < 16; i++) {
-              Prn(OUT, 0, String(i, HEX) );
-              Prn(OUT, 0, String("  "));
-              Prn(OUT, 0, String(DetectedRemoteSw [i] [0]) );
-              Prn(OUT, 0, String("."));
-              Prn(OUT, 0, String(DetectedRemoteSw [i] [1]) );
-              Prn(OUT, 0, String("."));
-              Prn(OUT, 0, String(DetectedRemoteSw [i] [2]) );
-              Prn(OUT, 0, String("."));
-              Prn(OUT, 0, String(DetectedRemoteSw [i] [3]) );
-              Prn(OUT, 0, String(":"));
-              Prn(OUT, 1, String(DetectedRemoteSwPort [i]) );
-            }
-
-      // /
-    }else if(incomingByte==47 && TxUdpBuffer[2] == 'm'){
-          Prn(OUT, 1,"press 2-g for encoder rannge number 2-16...");
-          Prn(OUT, 0,">");
-          while (Serial.available() == 0) {
-            // Wait
-          }
-          incomingByte = Serial.read();
-          // 2-G
-          if( (incomingByte>=50 && incomingByte<=57) || (incomingByte>=97 && incomingByte<=103) ){
-            if(incomingByte>=50 && incomingByte<=57){
-              NumberOfEncoderOutputs = incomingByte-48;
-            }else if(incomingByte>=97 && incomingByte<=103){
-              NumberOfEncoderOutputs = incomingByte-87;
-            }
-            NumberOfEncoderOutputs--;
-            EEPROM.write(2, NumberOfEncoderOutputs); // address, value
+        // #endif
+            EEPROM.write(1, NET_ID); // address, value
             EEPROM.commit();
-            Prn(OUT, 0,"** Now Encoder range change to ");
-            Prn(OUT, 0, String(NumberOfEncoderOutputs+1) );
+            Prn(OUT, 0,"** Now NET-ID change to 0x");
+            if(NET_ID <=0x0f){
+              Prn(OUT, 0, String("0"));
+            }
+            Prn(OUT, 0, String(NET_ID, HEX) );
             Prn(OUT, 1," **");
             if(EnableSerialDebug==1){
               Prn(OUT, 0,"EEPROM read [");
-              Prn(OUT, 0, String(EEPROM.read(2)) );
+              Prn(OUT, 0, String(EEPROM.read(1), HEX) );
               Prn(OUT, 1,"]");
             }
-            TxUDP('s', packetBuffer[2], 'c', 'f', 'm', 1);    // 0=broadcast, 1= direct to RX IP
+            TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
             if(TxUdpBuffer[2] == 'm'){
               TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
             }
+        // #if !defined(HW_BCD_SW)
           }else{
-            Prn(OUT, 1,"must be 0-f");
+            Prn(OUT, 1," accepts 0-f, exit");
           }
-
-          // (
-          }else if(incomingByte==40){
-              Prn(OUT, 1,"Write baudrate and wait");
-              Prn(OUT, 0,"> ");
-              if(OUT==0){
-                while(!Serial.available()) {
-                }
-                delay(3000);
-                CompareInt = Serial.parseInt();
-              }else if(OUT==1){
-                if (TelnetServerClients[0] && TelnetServerClients[0].connected()){
-                  delay(5000);
-                  if(TelnetServerClients[0].available()){
-                    // while(TelnetServerClients[0].available()){
-                    //   Prn(OUT, 1, "4" );
-                    //   // incomingByte=TelnetServerClients[0].read();
-                    // }
-                    CompareInt = TelnetServerClients[0].parseInt();
-                  }
-                }
-              }
-              if(CompareInt>=80 && CompareInt<=5000000){
-                SERIAL1_BAUDRATE = CompareInt;
-                EEPROM.writeInt(14, SERIAL1_BAUDRATE);
-                EEPROM.commit();
-                Prn(OUT, 0," Set ");
-                Prn(OUT, 1, String(SERIAL1_BAUDRATE) );
-                Prn(OUT, 0,"** device will be restarted **");
-                delay(1000);
-                TelnetServerClients[0].stop();
-                ESP.restart();
-              }else{
-                Prn(OUT, 0,"Out of range.");
-              }
-
-        // )
-        }else if(incomingByte==41){
-              Prn(OUT, 1,"Write IP port (1-65535) and wait");
-              Prn(OUT, 0,"> ");
-              if(OUT==0){
-                while(!Serial.available()) {
-                }
-                delay(3000);
-                CompareInt = Serial.parseInt();
-              }else if(OUT==1){
-                if (TelnetServerClients[0] && TelnetServerClients[0].connected()){
-                  delay(5000);
-                  if(TelnetServerClients[0].available()){
-                    // while(TelnetServerClients[0].available()){
-                    //   Prn(OUT, 1, "4" );
-                    //   // incomingByte=TelnetServerClients[0].read();
-                    // }
-                    CompareInt = TelnetServerClients[0].parseInt();
-                  }
-                }
-              }
-              if(CompareInt>=1 && CompareInt<=65535){
-                SerialServerIPport = CompareInt;
-                EEPROM.writeInt(18, SerialServerIPport);
-                EEPROM.commit();
-                Prn(OUT, 0," Set ");
-                Prn(OUT, 1, String(SerialServerIPport) );
-                Prn(OUT, 0,"** device will be restarted **");
-                delay(1000);
-                TelnetServerClients[0].stop();
-                ESP.restart();
-              }else{
-                Prn(OUT, 0,"Out of range.");
-              }
-
-          // w
-          }else if(incomingByte==119 && TxUdpBuffer[2]!='n'){
-              Prn(OUT, 1,"Write reboot watchdog in minutes (0-10080), 0-disable and wait");
-              Prn(OUT, 1,"recomended 1440 (1 day)");
-              Prn(OUT, 0,"> ");
-              if(OUT==0){
-                while(!Serial.available()) {
-                }
-                delay(3000);
-                CompareInt = Serial.parseInt();
-              }else if(OUT==1){
-                if (TelnetServerClients[0] && TelnetServerClients[0].connected()){
-                  delay(5000);
-                  if(TelnetServerClients[0].available()){
-                    // while(TelnetServerClients[0].available()){
-                    //   Prn(OUT, 1, "4" );
-                    //   // incomingByte=TelnetServerClients[0].read();
-                    // }
-                    CompareInt = TelnetServerClients[0].parseInt();
-                  }
-                }
-              }
-              if(CompareInt>=0 && CompareInt<=10080){
-                RebootWatchdog = CompareInt;
-                EEPROM.writeUInt(26, RebootWatchdog);
-                EEPROM.commit();
-                Prn(OUT, 0," Set ");
-                Prn(OUT, 0, String(EEPROM.readUInt(26)) );
-                Prn(OUT, 1," minutes");
-              }else{
-                Prn(OUT, 0,"Out of range.");
-              }
-
-          // W
-        }else if(incomingByte==87 && TxUdpBuffer[2]!='n'){
-              Prn(OUT, 1,"Write clear output watchdog in minutes (0-10080), 0-disable nad wait");
-              Prn(OUT, 1,"note: if you need clear output after reboot watchdog, set smaller than it");
-              Prn(OUT, 0,"> ");
-              if(OUT==0){
-                while(!Serial.available()) {
-                }
-                delay(3000);
-                CompareInt = Serial.parseInt();
-              }else if(OUT==1){
-                if (TelnetServerClients[0] && TelnetServerClients[0].connected()){
-                  delay(5000);
-                  if(TelnetServerClients[0].available()){
-                    // while(TelnetServerClients[0].available()){
-                    //   Prn(OUT, 1, "4" );
-                    //   // incomingByte=TelnetServerClients[0].read();
-                    // }
-                    CompareInt = TelnetServerClients[0].parseInt();
-                  }
-                }
-              }
-              if(CompareInt>=0 && CompareInt<=10080){
-                OutputWatchdog = CompareInt;
-                EEPROM.writeUInt(30, OutputWatchdog);
-                EEPROM.commit();
-                Prn(OUT, 0," Set ");
-                Prn(OUT, 0, String(EEPROM.readUInt(30)) );
-                Prn(OUT, 1," minutes");
-              }else{
-                Prn(OUT, 0,"Out of range.");
-              }
-
-        // <
-        }else if(incomingByte==60 && TxUdpBuffer[2]!='n'){
-              Prn(OUT, 1,"write UDP port (1-65535) and wait");
-              Prn(OUT, 0,"> ");
-              if(OUT==0){
-                while(!Serial.available()) {
-                }
-                delay(3000);
-                CompareInt = Serial.parseInt();
-              }else if(OUT==1){
-                if (TelnetServerClients[0] && TelnetServerClients[0].connected()){
-                  delay(5000);
-                  if(TelnetServerClients[0].available()){
-                    // while(TelnetServerClients[0].available()){
-                    //   Prn(OUT, 1, "4" );
-                    //   // incomingByte=TelnetServerClients[0].read();
-                    // }
-                    CompareInt = TelnetServerClients[0].parseInt();
-                  }
-                }
-              }
-              Prn(OUT, 1, String(CompareInt) );
-
-              if(CompareInt>=1 && CompareInt<=65535){
-                IncomingSwitchUdpPort = CompareInt;
-                EEPROM.writeInt(22, IncomingSwitchUdpPort);
-                EEPROM.commit();
-                Prn(OUT, 0," Set ");
-                Prn(OUT, 1, String(IncomingSwitchUdpPort) );
-                Prn(OUT, 0,"** device will be restarted **");
-                delay(1000);
-                TelnetServerClients[0].stop();
-                ESP.restart();
-              }else{
-                Prn(OUT, 0,"Out of range.");
-              }
-
-          // ?
-        }else if(incomingByte==63){
-            ListCommands(OUT);
-        }else{
-          Prn(OUT, 0," [");
-          Prn(OUT, 0, String(incomingByte) ); //, DEC);
-          Prn(OUT, 1,"] unknown command");
-          ListCommands(OUT);
+        // #endif
         }
-  incomingByte=0;
+      }else{
+        Prn(OUT, 1," accepts 0-f, exit");
+      }
+
+    // $
+    }else if(incomingByte==36){
+      EnableGroupPrefix=!EnableGroupPrefix;
+      Prn(OUT, 0,"** Group sufix (multi control) [");
+      EEPROM.write(4, EnableGroupPrefix);
+      EEPROM.commit();
+      if(EnableGroupPrefix==true){
+        Prn(OUT, 1,"ON] **");
+      }else{
+        Prn(OUT, 1,"OFF] **");
+      }
+      if(EnableGroupPrefix==true){
+        // clear prefix
+        bitClear(NET_ID, 4);
+        bitClear(NET_ID, 5);
+        bitClear(NET_ID, 6);
+        bitClear(NET_ID, 7); // <-
+      }
+      Prn(OUT, 1,"** IP switch will be restarted **");
+      delay(1000);
+      TelnetServerClients[0].stop();
+      ESP.restart();
+
+    // .
+    }else if(incomingByte==46 && TxUdpBuffer[2]=='m' && EnableGroupPrefix){
+      Prn(OUT, 1,"List detected IP switch by NET-ID prefix (multi control)");
+      for (int i = 0; i < 16; i++) {
+        Prn(OUT, 0, String(i, HEX) );
+        Prn(OUT, 0, String("  "));
+        Prn(OUT, 0, String(DetectedRemoteSw [i] [0]) );
+        Prn(OUT, 0, String("."));
+        Prn(OUT, 0, String(DetectedRemoteSw [i] [1]) );
+        Prn(OUT, 0, String("."));
+        Prn(OUT, 0, String(DetectedRemoteSw [i] [2]) );
+        Prn(OUT, 0, String("."));
+        Prn(OUT, 0, String(DetectedRemoteSw [i] [3]) );
+        Prn(OUT, 0, String(":"));
+        Prn(OUT, 1, String(DetectedRemoteSwPort [i]) );
+      }
+
+    // (
+    }else if(incomingByte==40){
+      Prn(OUT, 1,"Write baudrate");
+      EnterInt(OUT);
+      if(CompareInt>=80 && CompareInt<=5000000){
+        SERIAL1_BAUDRATE = CompareInt;
+        EEPROM.writeInt(14, SERIAL1_BAUDRATE);
+        EEPROM.commit();
+        Prn(OUT, 0," Set ");
+        Prn(OUT, 1, String(SERIAL1_BAUDRATE) );
+        Prn(OUT, 0,"** device will be restarted **");
+        delay(1000);
+        TelnetServerClients[0].stop();
+        ESP.restart();
+      }else{
+        Prn(OUT, 0,"Out of range.");
+      }
+
+    // )
+    }else if(incomingByte==41){
+      Prn(OUT, 1,"Write IP port (1-65535)");
+      EnterInt(OUT);
+      if(CompareInt>=1 && CompareInt<=65535){
+        SerialServerIPport = CompareInt;
+        EEPROM.writeInt(18, SerialServerIPport);
+        EEPROM.commit();
+        Prn(OUT, 0," Set ");
+        Prn(OUT, 1, String(SerialServerIPport) );
+        Prn(OUT, 0,"** device will be restarted **");
+        delay(1000);
+        TelnetServerClients[0].stop();
+        ESP.restart();
+      }else{
+        Prn(OUT, 0,"Out of range.");
+      }
+
+    // &
+    }else if(incomingByte==38 && TxUdpBuffer[2]!='n'){
+      TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
+      if(TxUdpBuffer[2] == 'm'){
+        TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
+      }
+
+    // q
+    }else if(incomingByte==113 && TelnetServerClients[0].connected() ){
+      TelnetServerClients[0].stop();
+      TelnetAuthorized=false;
+      // TelnetServerClientAuth = {0,0,0,0};
+      TelnetAuthStep=0;
+
+    // Q
+    }else if(incomingByte==81 && TelnetServerClients[0].connected() ){
+      TelnetServerClients[0].stop();
+      TelnetAuthorized=false;
+      TelnetServerClientAuth = {0,0,0,0};
+      Serial.println(TelnetServerClientAuth);
+      TelnetAuthStep=0;
+      EEPROM.write(37, 0); // address, value
+      EEPROM.write(38, 0); // address, value
+      EEPROM.write(39, 0); // address, value
+      EEPROM.write(40, 0); // address, value
+      EEPROM.commit();
+
+    // @
+    }else if(incomingByte==64){
+      Prn(OUT, 1,"** IP switch will be restarted **");
+      if(RebootWatchdog > 0){
+        Prn(OUT, 1,"   Activate reboot watchdog - store outputs to EEPROM...");
+        EEPROM.writeByte(34, ShiftOutByte[0]);
+        EEPROM.writeByte(35, ShiftOutByte[1]);
+        EEPROM.writeByte(36, ShiftOutByte[2]);
+        EEPROM.commit();
+        delay(1000);
+      }
+      TelnetServerClients[0].stop();
+      ESP.restart();
+
+    // anykey
+    }else{
+      Prn(OUT, 0," [");
+      Prn(OUT, 0, String(incomingByte) ); //, DEC);
+      Prn(OUT, 1,"] unknown command");
+      ListCommands(OUT);
+    }
+    incomingByte=0;
   }
 }
+
+//-------------------------------------------------------------------------------------------------------
+void EnterChar(int OUT){
+  incomingByte = 0;
+  Prn(OUT, 0,">");
+  if(OUT==0){
+    while (Serial.available() == 0) {
+      // Wait
+    }
+    incomingByte = Serial.read();
+  }else if(OUT==1){
+    if (TelnetServerClients[0] && TelnetServerClients[0].connected()){
+      while(incomingByte==0){
+        if(TelnetServerClients[0].available()){
+          incomingByte=TelnetServerClients[0].read();
+        }
+      }
+      if(EnableSerialDebug==1){
+        Serial.println();
+        Serial.print("Telnet rx-");
+        Serial.print(incomingByte, DEC);
+      }
+    }
+  }
+  Prn(OUT, 1, String(char(incomingByte)) );
+}
+
+//-------------------------------------------------------------------------------------------------------
+
+void EnterInt(int OUT){
+  incomingByte = 0;
+  Prn(OUT, 0,"> ");
+  if(OUT==0){
+    while(!Serial.available()) {
+    }
+    delay(3000);
+    CompareInt = Serial.parseInt();
+  }else if(OUT==1){
+    if (TelnetServerClients[0] && TelnetServerClients[0].connected()){
+      bool br=true;
+      int intField[10];
+      int count=0;
+
+      while(incomingByte==0 && br==true){
+        if(TelnetServerClients[0].available()){
+          incomingByte=TelnetServerClients[0].read();
+          // out of 0-9
+          if(incomingByte<48 || incomingByte>57){
+            br=false;
+            intField[count]=0;
+            Prn(OUT, 1,"");
+          }else{
+            intField[count]=incomingByte-48;
+            Prn(OUT, 0,String(intField[count]));
+            count++;
+            incomingByte=0;
+          }
+        }
+      }
+
+      count--;
+      CompareInt=0;
+      int i=1;
+      while(count>-1){
+        CompareInt=CompareInt+intField[count]*i;
+        // Prn(OUT, 1, String(intField[count])+"*"+String(i)+"="+String(CompareInt) );
+        i=i*10;
+        count--;
+      }
+    }
+  }
+  // Prn(OUT, 1, "out"+String(CompareInt) );
+}
+//-------------------------------------------------------------------------------------------------------
+
+void EnterIntOld(int OUT){
+  Prn(OUT, 0,"> ");
+  if(OUT==0){
+    while(!Serial.available()) {
+    }
+    delay(3000);
+    CompareInt = Serial.parseInt();
+  }else if(OUT==1){
+    if (TelnetServerClients[0] && TelnetServerClients[0].connected()){
+      delay(5000);
+      if(TelnetServerClients[0].available()){
+        // while(TelnetServerClients[0].available()){
+        //   Prn(OUT, 1, "4" );
+        //   // incomingByte=TelnetServerClients[0].read();
+        // }
+        CompareInt = TelnetServerClients[0].parseInt();
+      }
+    }
+  }
+  Prn(OUT, 1, String(CompareInt) );
+}
+
 //-------------------------------------------------------------------------------------------------------
 void Prn(int OUT, int LN, String STR){
   if(OUT==0){
@@ -1159,7 +1153,7 @@ void ListCommands(int OUT){
       if(HW_BCD_SW==true){
         Prn(OUT, 0," [BCD-");
         for (int i = 0; i < 4; i++) {
-         Prn(OUT, 0, digitalRead(BCD[i]) );
+         Prn(OUT, 0,String(digitalRead(BCD[i])) );
         }
         Prn(OUT, 0,"]");
       }
@@ -1274,14 +1268,16 @@ void ListCommands(int OUT){
     }else{
       Prn(OUT, 1,"[OFF]");
     }
-  if(TxUdpBuffer[2]!='n'){
-    Prn(OUT, 0,"      +  net ID sufix by ");
-    if(HW_BCD_SW==true){
-      Prn(OUT, 1,"EEPROM/[BCD switch]");
-    }else{
-      Prn(OUT, 1,"[EEPROM]/BCD switch");
+  #if !defined(Ser2net)
+    if(TxUdpBuffer[2]!='n'){
+      Prn(OUT, 0,"      +  net ID sufix by ");
+      if(HW_BCD_SW==true){
+        Prn(OUT, 1,"EEPROM/[BCD switch]");
+      }else{
+        Prn(OUT, 1,"[EEPROM]/BCD switch");
+      }
     }
-  }
+  #endif
   if(TxUdpBuffer[2]!='n'){
     Prn(OUT, 0,"      #  network ID prefix [");
     byte ID = NET_ID;
@@ -1338,9 +1334,10 @@ void ListCommands(int OUT){
     Prn(OUT, 1,"      &  send broadcast packet");
   }
   if(TelnetServerClients[0].connected()){
-    Prn(OUT, 0,"      q  logout and close telnet [logged from ");
+    Prn(OUT, 0,"      q  disconnect and close telnet [logged from ");
     Prn(OUT, 0, String(TelnetServerClientAuth[0])+"."+String(TelnetServerClientAuth[1])+"."+String(TelnetServerClientAuth[2])+"."+String(TelnetServerClientAuth[3]) );
     Prn(OUT, 1,"]");
+    Prn(OUT, 1,"      Q  logout with erase your IP from memory and close telnet");
   }
   Prn(OUT, 1,"      @  restart IP switch");
   Prn(OUT, 1,"---------------------------------------------");
@@ -2295,15 +2292,18 @@ void TelnetAuth(){
         TelnetLoginFails=0;
       }
       if(TelnetLoginFails<=3){
-        Prn(1, 0,"Login? [y/n] ");
+        Prn(1, 1,"Login? [y/n] ");
         TelnetAuthStep++;
+        incomingByte=0;
       }
       break; }
     case 1: {
       // incomingByte=TelnetRX();
-      if(incomingByte==121){
-        Prn(1, 1,"y");
+      if(incomingByte==121 || incomingByte==89){
+        Prn(1, 1,String(char(incomingByte)));
         TelnetAuthStep++;
+      }else if(incomingByte!=121 && incomingByte!=0){
+        TelnetAuthStep=0;
       }
       break; }
     case 2: {
@@ -2393,33 +2393,6 @@ void AuthQ(int NR, bool BAD){
 }
 
 //-------------------------------------------------------------------------------------------------------
-byte TelnetRX(){
-  for(i = 0; i < MAX_SRV_CLIENTS; i++){
-    if (TelnetServerClients[i] && TelnetServerClients[i].connected()){
-      if(TelnetServerClients[i].available()){
-        // OUT = 1;
-        if(EnableSerialDebug==1){
-          Serial.println();
-          Serial.print("Telnet rx-");
-        }
-        while(TelnetServerClients[i].available()){
-          byte incomingByte=TelnetServerClients[i].read();
-          if(EnableSerialDebug==1){
-            Serial.print(incomingByte, HEX);
-          }
-          return incomingByte;
-        }
-      }
-    }else{
-      if (TelnetServerClients[i]) {
-        TelnetServerClients[i].stop();
-      }
-    }
-  }
-  return 0;
-}
-
-//-------------------------------------------------------------------------------------------------------
 void Telnet(){
   uint8_t i;
   // if (wifiMulti.run() == WL_CONNECTED) {
@@ -2456,7 +2429,7 @@ void Telnet(){
           // while(TelnetServerClients[i].available()) Serial_one.write(TelnetServerClients[i].read());
           if(EnableSerialDebug==1){
             Serial.println();
-            Serial.print("Telnet rx-");
+            Serial.print("TelnetRX ");
           }
 
           while(TelnetServerClients[i].available()){
@@ -2464,7 +2437,7 @@ void Telnet(){
             // Serial_one.write(RX);
             if(EnableSerialDebug==1){
               // Serial.write(RX);
-              Serial.print(incomingByte, HEX);
+              Serial.print(char(incomingByte));
             }
           }
         }
