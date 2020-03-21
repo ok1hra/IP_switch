@@ -28,9 +28,16 @@ Send test packet
 Remote USB access
   screen /dev/ttyUSB0 115200
 
-HARDWARE ESP32-GATEWAY
+HARDWARE ESP32-GATEWAY/ESP32-POE
 
 Changelog:
+2020-03 - support XL switch on ESP32-POE https://www.olimex.com/Products/IoT/ESP32/ESP32-POE/
+        - support Icom CI-V Band Decoder
+        - support TFT LCD by https://www.olimex.com/Products/Modules/LCD/MOD-LCD2-8RTP/
+2020-01 - telnet access key generate automaticaly
+        - redesign CLI enter value
+2019-10 - add #define PCBrev04
+2019-09 - disable start snake, show key in serial terminal
 2019-06 - telnet with loggin support
 2019-05 - reboot and clear output watchdog
 2019-04 - group button support (idea TNX SM0MDG)
@@ -48,22 +55,78 @@ Changelog:
 
 ToDo
 - telnet inactivity watchdog > close
+- custom name for outputs
+- https://github.com/espressif/arduino-esp32/blob/master/libraries/Update/examples/AWS_S3_OTA_Update/AWS_S3_OTA_Update.ino
 */
 //-------------------------------------------------------------------------------------------------------
 
-#define ETHERNET                    // Enable ESP32 ethernet (DHCP IPv4)
-// #define WIFI                          // Enable ESP32 WIFI (DHCP IPv4)
-// const char* ssid     = "";
-// const char* password = "";
-
-const int keyNumber = 0;
-// How to generate new key
-// cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 100 | head -n 1
-const char* key="yWW3aaxjXua4wcoXUjkkOiAwChRwaUakVIfAUmmHV4ylwIXvN6Ucy3oH25T5ZzNYQ2r0L4s42tZIJT9XIgt9VVYxnDWtM7AVN6D8";
+// #define PCBrev04                    // Enable for ESP32-GATEWAY PCB revision 0.4 or later
+#define XLswitch                       // Enable for XL switch hardware with ESP32-POE
+const char* REV = "20200321";
+const char* otaPassword = "remoteqth";
 
 //-------------------------------------------------------------------------------------------------------
-const char* REV = "20190612";
-// #define Ser2net                  // Serial to ip proxy - DISABLE if board revision 0.3 or lower
+
+#define XLswitchANT 16                   // number of antenna output
+#define XLswitchTRX 2                   // number of trx output
+#define XLswitchCIV           // Icom CIV
+#if defined(XLswitchCIV)
+  #define REQUEST        500    // [ms] use TXD output for sending frequency request
+  #define CIV_ADRESS    0x56    // CIV input HEX Icom adress (0x is prefix)
+  #define CIV_ADR_OUT   0x56    // CIV output HEX Icom adress (0x is prefix)
+  int fromAdress = 0xE0;              // 0E
+  byte rdI[11];   //read data icom
+  String rdIS;    //read data icom string
+  long freqPrev1;
+  byte incomingByte = 0;
+  int state = 1;  // state machine
+  bool StateMachineEnd = false;
+  int BAND = 0;
+  int previousBAND = -1;
+  long freq = 0;
+  const long Freq2Band[14][2] = {/*
+  Freq Hz from       to   Band number
+  */   {1810000,   2000000},  // #1 [160m]
+       {3500000,   3800000},  // #2  [80m]
+       {7000000,   7200000},  // #3  [40m]
+      {10100000,  10150000},  // #4  [30m]
+      {14000000,  14350000},  // #5  [20m]
+      {18068000,  18168000},  // #6  [17m]
+      {21000000,  21450000},  // #7  [15m]
+      {24890000,  24990000},  // #8  [12m]
+      {28000000,  29700000},  // #9  [10m]
+      {50000000,  52000000},  // #10  [6m]
+      {70000000,  72000000},  // #11  [4m]
+     {144000000, 146000000},  // #12  [2m]
+     {430000000, 440000000},  // #13  [70cm]
+     {1240000000, 1300000000},  // #14  [23cm]
+     // {2300000000, 2450000000},  // #15  [13cm]
+     // {3300000000, 3500000000},  // #16  [9cm]
+     // // {5650000000, 5850000000},  // #16  [6cm]
+  };
+  long RequestTimeout[2]={0,
+    #if defined(REQUEST)
+      REQUEST
+    #else
+      0
+    #endif
+  };
+#endif
+
+#define ETHERNET                       // Enable ESP32 ethernet (DHCP IPv4)
+// #define WIFI                        // Enable ESP32 WIFI (DHCP IPv4)
+const char* ssid     = "";
+const char* password = "";
+
+// const char* ssid     = "h";
+// const char* password = "x7T1/aiXfr";
+// KEY=20 && keystring=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 100 | head -n 1) && echo $KEY-$keystring >> key-log.txt && echo $keystring | sed 's/.\{10\}/& |\n/g' | nl -i 10 -n rn -s " | " | sed '1s/^/          Key #'"$KEY"'\n\n/' | enscript -B -p output.ps && ps2pdf output.ps key-$KEY.pdf && gvfs-open key-$KEY.pdf
+// How to generate new key
+// cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 100 | head -n 1
+
+char key[100];
+byte InputByte[21];
+#define Ser2net                  // Serial to ip proxy - DISABLE if board revision 0.3 or lower
 #define EnableOTA                // Enable flashing ESP32 Over The Air
 bool HW_BCD_SW = 0;              // enable hardware ID board bcd switch (disable if not installed)
 int NumberOfEncoderOutputs = 8;  // 2-16
@@ -83,9 +146,11 @@ unsigned int DetectedRemoteSwPort[16];
 
 const int SERIAL_BAUDRATE = 115200; // serial debug baudrate
 int SERIAL1_BAUDRATE; // serial1 to IP baudrate
-int incomingByte = 0;   // for incoming serial data
+#if defined(Ser2net) && !defined(XLswitch)
+  int incomingByte = 0;   // for incoming serial data
+#endif
 
-#if !defined(Ser2net)
+#if !defined(Ser2net) && !defined(XLswitch)
   const int BCD[4] = {34, 33, 32, 10};  // BCD encoder PINs
 #endif
 
@@ -93,7 +158,7 @@ int i = 0;
 #include <WiFi.h>
 #include <WiFiUdp.h>
 #include "EEPROM.h"
-#define EEPROM_SIZE 41   /*
+#define EEPROM_SIZE 141   /*
 0    -listen source
 1    -net ID
 2    -encoder range
@@ -110,6 +175,7 @@ int i = 0;
 35    - Bank1 storage
 36    - Bank2 storage
 37-40 - Authorised telnet client IP
+41-140 - Authorised telnet client key
 */
 unsigned int RebootWatchdog;
 unsigned int OutputWatchdog;
@@ -138,23 +204,119 @@ String HTTP_req;
   #include <ArduinoOTA.h>
 #endif
 
-#if defined(Ser2net)
+#if defined(Ser2net) && !defined(XLswitch)
   #define RX1 16
   #define TX1 17
   HardwareSerial Serial_one(1);
-  #if defined(ShiftOut)
+#endif
+#if defined(XLswitchCIV) && defined(XLswitch)
+  #define RX1 35
+  #define TX1 33
+  HardwareSerial Serial_one(1);
+#endif
+#if defined(PCBrev04)
     const int ShiftOutDataPin = 32;
-    const int ShiftOutLatchPin = 35;  // Input only
+    const int ShiftOutLatchPin = 33;
     const int ShiftOutClockPin = 5;
     byte ShiftOutByte[3];
-  #endif
+#elif defined(XLswitch)
+  const int ShiftOutDataPin = 33;
+  const int ShiftOutLatchPin = 32;
+  const int ShiftOutClockPin = 4;
+  byte ShiftOutByte[3];
 #else
-  #if defined(ShiftOut)
     const int ShiftOutDataPin = 17;
     const int ShiftOutLatchPin = 16;
     const int ShiftOutClockPin = 5;
     byte ShiftOutByte[3];
-  #endif
+#endif
+#if defined(XLswitch)
+  const int StatusLedAPin = 5;
+  const int StatusLedBPin = 13;
+  bool StatusLedB = false;
+  bool StatusLedBTimer[2] = {0,500};
+  int LcdNeedRefresh = 100;
+
+// https://learn.adafruit.com/adafruit-gfx-graphics-library/using-fonts
+
+  /***************************************************
+    This is an example made by Adafruit and modifed by Olimex for MOD-LCD2.8RTP
+    This demo was tested with Olimex MOD-LCD2.8RTP and ESP32-EVB and OLIMEXINO-2560.
+    The boards were connected via UEXT connector and cable.
+
+    Make sure to establish proper hardware connections with your board.
+    The display requires SPI, the touschreen I2C. Refer to Board_Pinout.h.
+
+    The original example is a GFX example for the Adafruit ILI9341 Breakout and Shield
+    ----> http://www.adafruit.com/products/1651
+
+    Check out the link above for Adafruit's tutorials and wiring diagrams
+    These displays use SPI to communicate, 4 or 5 pins are required to
+    interface (RST is optional)
+    Adafruit invests time and resources providing the open source code,
+    please support Adafruit and open-source hardware by purchasing
+    products from Adafruit!
+
+    Written by Limor Fried/Ladyada for Adafruit Industries.
+    MIT license, all text above must be included in any redistribution
+   ****************************************************/
+
+   // In order to work you have to install Adafruit GFX Library
+   // To do so go to:
+   // Main menu --> Sketch --> Inlcude Librariy --> Manage Libraries...
+   // In the search box filter "Adafruit GFX Library" and install it
+   // Tested with version 1.2.3 of the library
+
+  // #include "Board_Pinout.h"
+  #include "SPI.h"
+  #include "Adafruit_GFX.h"
+  #include "Adafruit_ILI9341.h"
+  #include "Wire.h"
+  #include "Adafruit_STMPE610.h"
+
+  // This is calibration data for the raw touch data to the screen coordinates
+  #define TS_MINX 290
+  #define TS_MINY 285
+  #define TS_MAXX 7520
+  #define TS_MAXY 7510
+  #define TS_I2C_ADDRESS 0x4d
+
+  // This is pinouts for ESP32-EVB
+  #define TFT_DC 15
+  #define TFT_CS 5
+  #define TFT_MOSI 2
+  #define TFT_CLK 14
+
+  Adafruit_STMPE610 ts = Adafruit_STMPE610();
+
+  // Size of the color selection boxes and the paintbrush size
+  #define BOXSIZE 40
+
+  Adafruit_ILI9341 tft = Adafruit_ILI9341(TFT_CS, TFT_DC);
+
+  uint8_t tp[5];
+
+  /*
+  #define ILI9341_BLACK       0x0000  ///<   0,   0,   0
+  #define ILI9341_NAVY        0x000F  ///<   0,   0, 123
+  #define ILI9341_DARKGREEN   0x03E0  ///<   0, 125,   0
+  #define ILI9341_DARKCYAN    0x03EF  ///<   0, 125, 123
+  #define ILI9341_MAROON      0x7800  ///< 123,   0,   0
+  #define ILI9341_PURPLE      0x780F  ///< 123,   0, 123
+  #define ILI9341_OLIVE       0x7BE0  ///< 123, 125,   0
+  #define ILI9341_LIGHTGREY   0xC618  ///< 198, 195, 198
+  #define ILI9341_DARKGREY    0x7BEF  ///< 123, 125, 123
+  #define ILI9341_BLUE        0x001F  ///<   0,   0, 255
+  #define ILI9341_GREEN       0x07E0  ///<   0, 255,   0
+  #define ILI9341_CYAN        0x07FF  ///<   0, 255, 255
+  #define ILI9341_RED         0xF800  ///< 255,   0,   0
+  #define ILI9341_MAGENTA     0xF81F  ///< 255,   0, 255
+  #define ILI9341_YELLOW      0xFFE0  ///< 255, 255,   0
+  #define ILI9341_WHITE       0xFFFF  ///< 255, 255, 255
+  #define ILI9341_ORANGE      0xFD20  ///< 255, 165,   0
+  #define ILI9341_GREENYELLOW 0xAFE5  ///< 173, 255,  41
+  #define ILI9341_PINK        0xFC18  ///< 255, 130, 198
+  */
 #endif
 
 #define MAX_SRV_CLIENTS 1
@@ -174,6 +336,12 @@ int TelnetLoginFails=0;
 long TelnetLoginFailsBanTimer[2]={0,600000};
 int RandomNumber;
 
+#if !defined(XLswitch)
+  long MeterRefreshTimer[2]={0,100};
+  const int MeterPin[4] = {34,35,36,39};
+  int MeterValue[4];
+#endif
+
 int CompareInt;
 //-------------------------------------------------------------------------------------------------------
 
@@ -188,10 +356,26 @@ void setup() {
     pinMode(ShiftOutDataPin, OUTPUT);
   #endif
 
-  #if !defined(Ser2net)
+  #if !defined(Ser2net) && !defined(XLswitch)
     for (int i = 0; i < 4; i++) {
      pinMode(BCD[i], INPUT);
     }
+  #endif
+
+  #if defined(XLswitch)
+    pinMode(StatusLedAPin, OUTPUT);
+      digitalWrite(StatusLedAPin, LOW);
+    pinMode(StatusLedBPin, OUTPUT);
+      digitalWrite(StatusLedBPin, LOW);
+
+    delay(1000);
+    tft.begin();
+    Wire.begin();
+    pinMode(TFT_DC, OUTPUT);
+    // read diagnostics (optional but can help debug problems)
+    //uint8_t x = tft.readcommand8(ILI9341_RDMODE);
+    delay(1000);
+    ts.begin(TS_I2C_ADDRESS);
   #endif
 
   // Listen source
@@ -202,14 +386,14 @@ void setup() {
   }
   // 0-listen source
   TxUdpBuffer[2] = EEPROM.read(0);
-  if(TxUdpBuffer[2]=='o'||TxUdpBuffer[2]=='r'||TxUdpBuffer[2]=='m'||TxUdpBuffer[2]=='n'){
+  if(TxUdpBuffer[2]=='o'||TxUdpBuffer[2]=='r'||TxUdpBuffer[2]=='m'||TxUdpBuffer[2]=='e'){
     // OK
   }else{
     TxUdpBuffer[2]='n';
   }
 
   // 1-net ID
-  #if !defined(Ser2net)
+  #if !defined(Ser2net) && !defined(XLswitch)
     if(HW_BCD_SW==true){
       bitClear(NET_ID, 0);
       bitClear(NET_ID, 1);
@@ -221,7 +405,7 @@ void setup() {
   #endif
       NET_ID = EEPROM.read(1);
       TxUdpBuffer[0] = NET_ID;
-  #if !defined(Ser2net)
+  #if !defined(Ser2net) && !defined(XLswitch)
     }
   #endif
 
@@ -231,7 +415,7 @@ void setup() {
     NumberOfEncoderOutputs=8;
   }
 
-  #if defined(Ser2net)
+  #if defined(Ser2net) && !defined(XLswitch)
     HW_BCD_SW = 0;
   #else
     // 3-HW_BCD_SW
@@ -287,6 +471,23 @@ void setup() {
   TelnetServerClientAuth[2]=EEPROM.readByte(39);
   TelnetServerClientAuth[3]=EEPROM.readByte(40);
 
+  // 41-140 key
+  // if clear, generate
+  if(EEPROM.readByte(41)==255 && EEPROM.readByte(140)==255){
+    Serial.println();
+    Serial.println("  ** GENERATE KEY **");
+    for(int i=41; i<141; i++){
+      EEPROM.writeChar(i, RandomChar());
+      Serial.print("*");
+    }
+    EEPROM.commit();
+    Serial.println();
+  }
+  // read
+  for(int i=41; i<141; i++){
+    key[i-41] = EEPROM.readChar(i);
+  }
+
   // if(EnableSerialDebug==1){
     Serial.println();
     Serial.print("Version: ");
@@ -307,6 +508,14 @@ void setup() {
     if(TxUdpBuffer[2] == 'm' ){
       Serial.println("IP switch master");
     }
+    #if !defined(XLswitch)
+      if(TxUdpBuffer[2] == 'e' ){
+        Serial.println("Meter");
+        for (int i = 0; i < 4; i++) {
+          pinMode(MeterPin[i], INPUT);
+        }
+      }
+    #endif
     if(TxUdpBuffer[2] == 'n' ){
       Serial.println("none");
     }
@@ -340,7 +549,7 @@ void setup() {
       Serial.print("WIFI dBm: ");
       Serial.println(WiFi.RSSI());
     }
-    #if !defined(Ser2net)
+    #if !defined(Ser2net) && !defined(XLswitch)
       pinMode(BCD[1], OUTPUT);  // LED
       digitalWrite(BCD[1], HIGH);
       delay(100);
@@ -371,12 +580,16 @@ void setup() {
     // ArduinoOTA.setPort(3232);
     // Hostname defaults to esp3232-[MAC]
 
-    String StringHostname = "IP-relayID-"+String(NET_ID, HEX);
+    #if defined(XLswitch)
+      String StringHostname = "XL-switchID-"+String(NET_ID, HEX);
+    #else
+      String StringHostname = "IP-relayID-"+String(NET_ID, HEX);
+    #endif
     char copy[13];
     StringHostname.toCharArray(copy, 13);
 
     ArduinoOTA.setHostname(copy);
-    ArduinoOTA.setPassword("remoteqth");
+    ArduinoOTA.setPassword(otaPassword);
     // $ echo password | md5sum
     // ArduinoOTA.setPasswordHash("5587ba7a03b12a409ee5830cea97e079");
     ArduinoOTA
@@ -389,12 +602,30 @@ void setup() {
 
         // NOTE: if updating SPIFFS this would be the place to unmount SPIFFS using SPIFFS.end()
         Serial.println("Start updating " + type);
+        #if defined(XLswitch)
+          tft.fillScreen(ILI9341_ORANGE);
+          tft.setRotation(1);
+          tft.setTextColor(ILI9341_WHITE);
+          tft.setCursor(155,30);
+          tft.setTextSize(6);
+          tft.println("!");
+          tft.setCursor(70,100);
+          tft.setTextSize(3);
+          tft.println("OTA update");
+          tft.drawRect(57, 150, 206, 16, ILI9341_WHITE);
+          tft.setCursor(100,180);
+          tft.setTextSize(1);
+          tft.println("RemoteQTH.com firmware");
+        #endif
       })
       .onEnd([]() {
         Serial.println("\nEnd");
       })
       .onProgress([](unsigned int progress, unsigned int total) {
         Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+        #if defined(XLswitch)
+          tft.fillRect(60, 153, (progress / (total / 100))*2, 10, ILI9341_WHITE);
+        #endif
       })
       .onError([](ota_error_t error) {
         Serial.printf("Error[%u]: ", error);
@@ -408,11 +639,15 @@ void setup() {
     ArduinoOTA.begin();
   #endif
 
-  #if defined(Ser2net)
+  #if defined(Ser2net) && !defined(XLswitch)
     Serial_one.begin(SERIAL1_BAUDRATE, SERIAL_8N1, RX1, TX1);
   // Serial2.begin(9600);
   SerialServer.begin(SerialServerIPport);
   SerialServer.setNoDelay(true);
+  #endif
+
+  #if defined(XLswitchCIV) && defined(XLswitch)
+    Serial_one.begin(SERIAL1_BAUDRATE, SERIAL_8N1, RX1, TX1);
   #endif
 
   TelnetServer.begin(TelnetServerIPport);
@@ -429,12 +664,412 @@ void loop() {
   CLI();
   Telnet();
   CheckNetId();
+  Meter();
   Watchdog();
+  CIV();
+  LcdDisplay();
   #if defined(EnableOTA)
    ArduinoOTA.handle();
   #endif
 }
 // SUBROUTINES -------------------------------------------------------------------------------------------------------
+void CIV(){
+  #if defined(XLswitchCIV) && defined(XLswitch)
+    if(TxUdpBuffer[2]=='I'){
+      if (Serial_one.available()) {
+          incomingByte = Serial_one.read();
+          // if(EnableSerialDebug==1){
+          //   Prn(3, 0, String(incomingByte));
+          //   // Serial.print(incomingByte);
+          //   // Serial.print("|");
+          //   // Serial.println(incomingByte, HEX);
+          // }
+          icomSM(incomingByte);
+          rdIS="";
+          // if(rdI[10]==0xFD){    // state machine end
+          if(StateMachineEnd == true){    // state machine end
+            StateMachineEnd = false;
+            for (int i=9; i>=5; i-- ){
+                if (rdI[i] < 10) {            // leading zero
+                    rdIS = rdIS + 0;
+                }
+                rdIS = rdIS + String(rdI[i], HEX);  // append BCD digit from HEX variable to string
+            }
+            freq = rdIS.toInt();
+            if(EnableSerialDebug==1){
+              Prn(3, 0, String(freq));
+              Prn(3, 1, " Hz");
+            }
+            // Serial.println(freq);
+            // Serial.println("-------");
+            FreqToBandRules();
+            // bandSET();
+            LcdNeedRefresh=1;
+            RequestTimeout[0]=millis();
+          }
+      }
+
+      #if defined(REQUEST)
+        if(REQUEST > 0 && (millis() - RequestTimeout[0] > RequestTimeout[1])){
+          txCIV(3, 0, CIV_ADRESS);  // ([command], [freq]) 3=read
+          RequestTimeout[0]=millis();
+        }
+      #endif
+    }
+  #endif
+}
+
+//---------------------------------------------------------------------------------------------------------
+#if defined(XLswitchCIV) && defined(XLswitch)
+
+    //---------------------------------------------------------------------------------------------------------
+    void txCIV(int commandCIV, long dataCIVtx, int toAddress) {
+        //Serial.flush();
+        Serial_one.write(254);                                    // FE
+        Serial_one.write(254);                                    // FE
+        Serial_one.write(toAddress);                              // to adress
+        Serial_one.write(fromAdress);                             // from OE
+        Serial_one.write(commandCIV);                             // data
+        if (dataCIVtx != 0){
+            String freqCIVtx = String(dataCIVtx);             // to string
+            String freqCIVtxPart;
+            while (freqCIVtx.length() < 10) {                 // leding zeros
+                freqCIVtx = 0 + freqCIVtx;
+            }
+            for (int x=8; x>=0; x=x-2){                       // loop for 5x2 char [xx xx xx xx xx]
+                freqCIVtxPart = freqCIVtx.substring(x,x+2);   // cut freq to five part
+                    Serial_one.write(hexToDec(freqCIVtxPart));    // HEX to DEC, because write as DEC format from HEX variable
+            }
+        }
+        Serial_one.write(253);                                    // FD
+        // Serial.flush();
+        while(Serial_one.available()){        // clear buffer
+          Serial_one.read();
+        }
+        if(EnableSerialDebug==1){
+          Prn(3, 1, "FEFE"+String(toAddress, HEX)+String(fromAdress, HEX)+String(commandCIV, HEX)+"FD");
+        }
+    }
+
+    //---------------------------------------------------------------------------------------------------------
+    unsigned int hexToDec(String hexString) {
+        unsigned int decValue = 0;
+        int nextInt;
+        for (int i = 0; i < hexString.length(); i++) {
+            nextInt = int(hexString.charAt(i));
+            if (nextInt >= 48 && nextInt <= 57) nextInt = map(nextInt, 48, 57, 0, 9);
+            if (nextInt >= 65 && nextInt <= 70) nextInt = map(nextInt, 65, 70, 10, 15);
+            if (nextInt >= 97 && nextInt <= 102) nextInt = map(nextInt, 97, 102, 10, 15);
+            nextInt = constrain(nextInt, 0, 15);
+            decValue = (decValue * 16) + nextInt;
+        }
+        return decValue;
+    }
+
+    //---------------------------------------------------------------------------------------------------------
+    void icomSM(byte b){      // state machine
+        // This filter solves read from 0x00 0x05 0x03 commands and 00 E0 F1 address used by software
+        // Serial.print(b, HEX);
+        // Serial.print(" | ");
+        // Serial.println(state);
+        switch (state) {
+            case 1: if( b == 0xFE ){ state = 2; rdI[0]=b; rdI[10]=0x00; }; break;
+            case 2: if( b == 0xFE ){ state = 3; rdI[1]=b; }else{ state = 1;}; break;
+            // addresses that use different software 00-trx, e0-pc-ale, winlinkRMS, f1-winlink trimode
+            case 3: if( b == 0x00 || b == 0xE0 || b == 0x0E || b == 0xF1 ){ state = 4; rdI[2]=b;                       // choose command $03
+            }else if( b == CIV_ADRESS ){ state = 6; rdI[2]=b;
+                    }else if( b == 0xFE ){ state = 3; rdI[1]=b;      // FE (3x reduce to 2x)
+                    }else{ state = 1;}; break;                       // or $05
+
+            case 4: if( b == CIV_ADRESS ){ state = 5; rdI[3]=b; }else{ state = 1;}; break;                      // select command $03
+            case 5: if( b == 0x00 || b == 0x03 ){state = 8; rdI[4]=b;  // freq
+                    }else if( b == 0x04 ){state = 14; rdI[4]=b;        // mode
+                    }else if( b == 0xFE ){ state = 2; rdI[0]=b;        // FE
+                    }else{ state = 1;}; break;
+
+            case 6: if( b == 0x00 || b == 0xE0 || b == 0xF1 ){ state = 7; rdI[3]=b; }else{ state = 1;}; break;  // select command $05
+            case 7: if( b == 0x00 || b == 0x05 ){ state = 8; rdI[4]=b; }else{ state = 1;}; break;
+
+            case 8: if( b <= 0x99 ){state = 9; rdI[5]=b;             // 10Hz 1Hz
+                    }else if( b == 0xFE ){ state = 2; rdI[0]=b;      // FE
+                    }else{state = 1;}; break;
+            case 9: if( b <= 0x99 ){state = 10; rdI[6]=b;            // 1kHz 100Hz
+                    }else if( b == 0xFE ){ state = 2; rdI[0]=b;      // FE
+                    }else{state = 1;}; break;
+           case 10: if( b <= 0x99 ){state = 11; rdI[7]=b;            // 100kHz 10kHz
+                    }else if( b == 0xFE ){ state = 2; rdI[0]=b;      // FE
+                    }else{state = 1;}; break;
+           case 11: if( b <= 0x52 ){state = 12; rdI[8]=b;            // 10MHz 1Mhz
+                    }else if( b == 0xFE ){ state = 2; rdI[0]=b;      // FE
+                    }else{state = 1;}; break;
+           case 12: if( b <= 0x01 || b == 0x04){state = 13; rdI[9]=b; // 1GHz 100MHz  <-- 1xx/4xx MHz limit
+                    }else if( b == 0xFE ){ state = 2; rdI[0]=b;      // FE
+                    }else{state = 1;}; break;
+           case 13: if( b == 0xFD ){state = 1; rdI[10]=b; StateMachineEnd = true;
+                    }else if( b == 0xFE ){ state = 2; rdI[0]=b;      // FE
+                    }else{state = 1; rdI[10] = 0x00;}; break;
+
+           case 14: if( b <= 0x12 ){state = 15; rdI[5]=b;
+                    }else if( b == 0xFE ){ state = 2; rdI[0]=b;      // FE
+                    }else{state = 1;}; break;   // Mode
+           case 15: if( b <= 0x03 ){state = 16; rdI[6]=b;
+                    }else if( b == 0xFE ){ state = 2; rdI[0]=b;      // FE
+                    }else{state = 1;}; break;   // Filter
+           case 16: if( b == 0xFD ){state = 1; rdI[7]=b;
+                    }else if( b == 0xFE ){ state = 2; rdI[0]=b;      // FE
+                    }else{state = 1; rdI[7] = 0;}; break;
+        }
+    }
+    //-------------------------------------------------------------------------------------------------------
+    void FreqToBandRules(){
+             if (freq >=Freq2Band[0][0] && freq <=Freq2Band[0][1] )  {BAND=1;}  // 160m
+        else if (freq >=Freq2Band[1][0] && freq <=Freq2Band[1][1] )  {BAND=2;}  //  80m
+        else if (freq >=Freq2Band[2][0] && freq <=Freq2Band[2][1] )  {BAND=3;}  //  40m
+        else if (freq >=Freq2Band[3][0] && freq <=Freq2Band[3][1] )  {BAND=4;}  //  30m
+        else if (freq >=Freq2Band[4][0] && freq <=Freq2Band[4][1] )  {BAND=5;}  //  20m
+        else if (freq >=Freq2Band[5][0] && freq <=Freq2Band[5][1] )  {BAND=6;}  //  17m
+        else if (freq >=Freq2Band[6][0] && freq <=Freq2Band[6][1] )  {BAND=7;}  //  15m
+        else if (freq >=Freq2Band[7][0] && freq <=Freq2Band[7][1] )  {BAND=8;}  //  12m
+        else if (freq >=Freq2Band[8][0] && freq <=Freq2Band[8][1] )  {BAND=9;}  //  10m
+        else if (freq >=Freq2Band[9][0] && freq <=Freq2Band[9][1] ) {BAND=10;}  //   6m
+        else if (freq >=Freq2Band[10][0] && freq <=Freq2Band[10][1] ) {BAND=11;}  // 2m
+        else if (freq >=Freq2Band[11][0] && freq <=Freq2Band[11][1] ) {BAND=12;}  // 70cm
+        else {BAND=0;}                                                // out of range
+    }
+
+    //-------------------------------------------------------------------------------------------------------
+#endif
+
+//-------------------------------------------------------------------------------------------------------
+
+void LcdDisplay() {
+  #if defined(XLswitchCIV) && defined(XLswitch)
+    if(LcdNeedRefresh>0){
+
+      if(LcdNeedRefresh==100){
+        // Clear Screen
+        tft.fillScreen(ILI9341_BLACK);
+
+        tft.setRotation(1);
+        tft.setTextColor(ILI9341_ORANGE);
+        tft.setCursor(0,0);
+        tft.setTextSize(3);
+        tft.print("XLswitch");
+        if(TxUdpBuffer[2]=='I'){
+          tft.setCursor(240,0);
+          tft.setTextColor(ILI9341_LIGHTGREY);
+          tft.setTextSize(3);
+          tft.print("Icom");
+        }else{
+          tft.setCursor(230,0);
+          tft.setTextColor(ILI9341_LIGHTGREY);
+          tft.setTextSize(3);
+          tft.print("ID-");
+          tft.print(String(IdPrefix(NET_ID), HEX) );
+          tft.print(String(IdSufix(NET_ID), HEX) );
+        }
+        tft.drawLine(0,28,340,28, ILI9341_LIGHTGREY);
+
+
+        // lines
+        // int space = (226-28)/XLswitchTRX;
+        // for (int i = 0; i < XLswitchTRX+1; i++) {
+        //   tft.drawLine(0,28+i*space,340,28+i*space, ILI9341_LIGHTGREY);
+        //   if(i<XLswitchTRX){
+        //     for (int j = 0; j < 8; j++) {
+        //       tft.fillRoundRect(5+j*39, 28+i*space+5, 34, 34, 3, ILI9341_LIGHTGREY);
+        //       tft.fillRoundRect(5+j*39, 28+i*space+5+39, 34, 34, 3, ILI9341_LIGHTGREY);
+        //     }
+        //   }
+        // }
+
+
+        tft.drawLine(0,227,340,227, ILI9341_LIGHTGREY);
+        tft.setCursor(0,230);
+        tft.setTextColor(ILI9341_WHITE);
+        tft.setTextSize(1);
+        tft.print(String(ETH.localIP()[0])+"."+String(ETH.localIP()[1])+"."+String(ETH.localIP()[2])+"."+String(ETH.localIP()[3]) );
+
+        #if defined(XLswitchCIV) && defined(XLswitch)
+          tft.setTextSize(1);
+          tft.setTextColor(ILI9341_WHITE);
+          if(TxUdpBuffer[2]=='I'){
+            tft.setCursor(135,230);
+            tft.print(String(SERIAL1_BAUDRATE));
+            tft.print(" baud ");
+            tft.print(String(CIV_ADRESS, HEX) );
+            tft.print("h");
+          }
+          if(TxUdpBuffer[2]=='m'){
+            tft.setCursor(130,230);
+            tft.print("Manual IP switch");
+          }
+        #endif
+
+        tft.setCursor(270,230);
+        tft.setTextSize(1);
+        tft.setTextColor(ILI9341_WHITE);
+        tft.print(String(REV));
+      }
+
+      if(LcdNeedRefresh==1){
+        tft.fillRect(155, 170, 35, 22, ILI9341_BLACK);
+        tft.setCursor(155,170);
+        tft.setTextColor(ILI9341_LIGHTGREY);
+        tft.setTextSize(3);
+        tft.print(BAND);
+
+        tft.fillRect(70, 200, 180, 22, ILI9341_BLACK);
+        tft.setCursor(70,200);
+        tft.setTextColor(ILI9341_GREENYELLOW);
+        tft.setTextSize(3);
+        int longer=String(freq/1000).length();
+        if(longer<5){
+          tft.print(" ");
+        }
+        tft.print(String(freq/1000).substring(0, longer-3));
+        tft.print(".");
+        tft.print(String(freq/1000).substring(longer-3, longer));
+        tft.print(" kHz");
+      }
+
+      if(LcdNeedRefresh==2){
+        tft.setTextColor(ILI9341_GREENYELLOW);
+        tft.setTextSize(3);
+
+        tft.fillRect(70, 140, 180, 22, ILI9341_BLACK);
+        tft.setCursor(70,140);
+        tft.print(String(ShiftOutByte[0], BIN));
+
+        tft.fillRect(70, 170, 180, 22, ILI9341_BLACK);
+        tft.setCursor(70,170);
+        tft.print(String(ShiftOutByte[1], BIN));
+
+        tft.fillRect(70, 200, 180, 22, ILI9341_BLACK);
+        tft.setCursor(70,200);
+        tft.print(String(ShiftOutByte[2], BIN));
+      }
+
+      LcdNeedRefresh=0;
+    }
+  #endif
+}
+
+void LcdDisplayOLD() {
+  // This is just a draw some data Demo
+
+  // Clear Screen
+  tft.fillScreen(ILI9341_BLACK);
+  // Set some fancy background
+  testFastLines(ILI9341_DARKGREY,ILI9341_DARKCYAN);
+
+  // Print "current date and time"
+  tft.setCursor(5,5);
+  tft.setTextColor(ILI9341_WHITE);  tft.setTextSize(2);
+  tft.println("29-05-18      11:28"); //TODO: Print the real date and time
+
+
+  // Print "room temperature"
+  tft.setCursor(85,50);
+  tft.setTextColor(ILI9341_GREEN);  tft.setTextSize(4);
+  tft.println("22");//TODO: Print the real room temperature
+  tft.setCursor(148,50);
+  tft.println("C");
+  tft.drawCircle(138, 54, 4, ILI9341_GREEN);
+  tft.drawCircle(138, 54, 5, ILI9341_GREEN);
+  tft.setCursor(78,85);
+  tft.setTextColor(ILI9341_GREEN);  tft.setTextSize(1);
+  tft.println("ROOM TEMPERATURE");
+
+
+  // Now print Message box wit two yes/no buttons
+  tft.fillRoundRect(10,120, 220, 190, 8, ILI9341_OLIVE);
+  tft.drawRoundRect(10,120, 220, 190, 8, ILI9341_WHITE);
+
+  tft.setTextColor(ILI9341_WHITE);  tft.setTextSize(2);
+  tft.fillRoundRect(20,150, 200, 80,8, ILI9341_BLUE);
+  tft.setCursor(90, 165);
+  tft.println("Save");
+  tft.setCursor(40, 190);
+  tft.println("new settings?");
+  tft.drawRoundRect(20,150, 200, 80, 8, ILI9341_WHITE);
+  // Get the choise
+  bool answer = Get_yes_no();
+
+  if (answer == true)
+  {
+    // Some animation while "write to eeprom"
+  testFilledRects(ILI9341_DARKGREEN,ILI9341_DARKCYAN);
+  tft.setCursor(80, 150);
+  tft.setTextColor(ILI9341_WHITE);  tft.setTextSize(3);
+  tft.println("Done!");
+  } else   tft.fillScreen(ILI9341_RED);
+  // fill screen red to show negative choise
+  delay(1000);
+}
+
+//-------------------------------------------------------------------------------------------------------
+void Meter(){
+  #if !defined(XLswitch)
+  if(TxUdpBuffer[2] == 'e' && millis()-MeterRefreshTimer[0]>MeterRefreshTimer[1]){
+    MeterRefreshTimer[0]=millis();
+    for (int i = 0; i < 4; i++) {
+      MeterValue[i] = analogRead(MeterPin[i]);
+      if(EnableSerialDebug==1){
+        Serial.print(MeterValue[i]);
+        Serial.print(" ");
+      }
+    }
+    if(EnableSerialDebug==1){
+      Serial.println();
+      Serial.println(MeterValue[0], BIN);
+    }
+    // int tmp;
+    // byte buffer[6];
+    // tmp=MeterValue[0];
+    // for (int i = 0; i < 4; i++) {
+    //
+    // }
+    // buffer[0]=
+    //
+    // TxUDP('E', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 1);
+
+  }
+  #endif
+}
+//---------------------------------------------------------------------------------------------------------
+// void SplitValue(int A, int B){
+//   int tmp;
+//   tmp=MeterValue[0];
+//   for (int i = 0; i < 4; i++) {
+//
+//   }
+//
+//
+//   packetBuffer[0];
+//
+// }
+
+byte HiByte(int ID){
+  bitClear(ID, 0);  // ->
+  bitClear(ID, 1);
+  bitClear(ID, 2);
+  bitClear(ID, 3);
+  ID = ID >> 4;
+  return(ID);
+}
+
+//---------------------------------------------------------------------------------------------------------
+
+byte LowByte(int ID){
+  bitClear(ID, 4);
+  bitClear(ID, 5);
+  bitClear(ID, 6);
+  bitClear(ID, 7);  // <-
+  return(ID);
+}
+
+//-------------------------------------------------------------------------------------------------------
 void Watchdog(){
 
   if(RebootWatchdog > 0 && millis()-WatchdogTimer > RebootWatchdog*60000){
@@ -470,11 +1105,18 @@ void Watchdog(){
     // deactivate
     OutputWatchdog=123456;
   }
+
+  #if defined(XLswitch)
+    if(StatusLedB==true && millis()-StatusLedBTimer[0]>StatusLedBTimer[1]){
+      digitalWrite(StatusLedBPin, LOW);
+      StatusLedB = false;
+    }
+  #endif
 }
 
 //-------------------------------------------------------------------------------------------------------
 void CheckNetId(){
-  #if !defined(Ser2net)
+  #if !defined(Ser2net) && !defined(XLswitch)
   if (HW_BCD_SW==true){
     if(millis()-HW_BCD_SWTimer[0]>HW_BCD_SWTimer[1]){
       bitClear(NET_ID, 0);
@@ -511,6 +1153,8 @@ void CheckNetId(){
 //-------------------------------------------------------------------------------------------------------
 void CLI(){
   int OUT=2;
+  int intBuf=0;
+  int mult=1;
   // incomingByte = 0;
 
   if (Serial.available() > 0) {
@@ -537,8 +1181,36 @@ void CLI(){
   }
 
   if(OUT<2){
+    // ?
+    if(incomingByte==63){
+      ListCommands(OUT);
+
+
+    // // e
+    // }else if(incomingByte==101){
+    //   Prn(OUT, 1,"  Change source of control? (y/n)");
+    //   EnterChar(OUT);
+    //   if(incomingByte==89 || incomingByte==121){
+    //     TxUdpBuffer[2] = 'e';
+    //     EEPROM.write(0, 'e'); // address, value
+    //     EEPROM.commit();
+    //     Prn(OUT, 1,"Now control from: Meter");
+    //     if(EnableSerialDebug==1){
+    //       Prn(OUT, 0,"EEPROM read [");
+    //       Prn(OUT, 0, String(EEPROM.read(0)) );
+    //       Prn(OUT, 1,"]");
+    //     }
+    //     TxUDP('e', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
+    //     if(TxUdpBuffer[2] == 'm'){
+    //       TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
+    //     }
+    //   }
+
     // m
-    if(incomingByte==109){
+  }else if(incomingByte==109){
+    Prn(OUT, 1,"  Change source of control? (y/n)");
+    EnterChar(OUT);
+    if(incomingByte==89 || incomingByte==121){
       TxUdpBuffer[2] = 'm';
       EEPROM.write(0, 'm'); // address, value
       EEPROM.commit();
@@ -552,73 +1224,111 @@ void CLI(){
       if(TxUdpBuffer[2] == 'm'){
         TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
       }
+      #if defined(XLswitchCIV) && defined(XLswitch)
+        LcdNeedRefresh=100;
+      #endif
+    }
 
-    // r
-    }else if(incomingByte==114){
-      EnableGroupPrefix=false;
-        EEPROM.write(4, EnableGroupPrefix);
-        EEPROM.commit();
-      EnableGroupButton=false;
-        EEPROM.write(5, EnableGroupButton);
-        EEPROM.commit();
-      TxUdpBuffer[2] = 'r';
-      EEPROM.write(0, 'r'); // address, value
-      EEPROM.commit();
-      Prn(OUT, 1,"Now control from: Band decoder");
-      if(EnableSerialDebug==1){
-        Prn(OUT, 0,"EEPROM read [");
-        Prn(OUT, 0, String(EEPROM.read(0)) );
-        Prn(OUT, 1,"]");
-      }
-      TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
-      if(TxUdpBuffer[2] == 'm'){
-        TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
-      }
 
+    #if defined(XLswitchCIV) && defined(XLswitch)
+      // I
+      }else if(incomingByte==73){
+      Prn(OUT, 1,"  Change source of control? (y/n)");
+      EnterChar(OUT);
+      if(incomingByte==89 || incomingByte==121){
+        TxUdpBuffer[2] = 'I';
+        EEPROM.write(0, 'I'); // address, value
+        EEPROM.commit();
+        Prn(OUT, 1,"Now control from: Icom CI-V");
+        if(EnableSerialDebug==1){
+          Prn(OUT, 0,"EEPROM read [");
+          Prn(OUT, 0, String(EEPROM.read(0)) );
+          Prn(OUT, 1,"]");
+        }
+        LcdNeedRefresh=100;
+        // TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
+        // if(TxUdpBuffer[2] == 'm'){
+        //   TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
+        // }
+      }
+    #endif
+    // // r
+    // }else if(incomingByte==114){
+    //   Prn(OUT, 1,"  Change source of control? (y/n)");
+    //   EnterChar(OUT);
+    //   if(incomingByte==89 || incomingByte==121){
+    //     EnableGroupPrefix=false;
+    //         EEPROM.write(4, EnableGroupPrefix);
+    //         EEPROM.commit();
+    //       EnableGroupButton=false;
+    //         EEPROM.write(5, EnableGroupButton);
+    //         EEPROM.commit();
+    //       TxUdpBuffer[2] = 'r';
+    //       EEPROM.write(0, 'r'); // address, value
+    //       EEPROM.commit();
+    //       Prn(OUT, 1,"Now control from: Band decoder");
+    //       if(EnableSerialDebug==1){
+    //         Prn(OUT, 0,"EEPROM read [");
+    //         Prn(OUT, 0, String(EEPROM.read(0)) );
+    //         Prn(OUT, 1,"]");
+    //       }
+    //       TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
+    //       if(TxUdpBuffer[2] == 'm'){
+    //         TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
+    //       }
+    //     }
     // o
     }else if(incomingByte==111){
-      EnableGroupPrefix=false;
-        EEPROM.write(4, EnableGroupPrefix);
+      Prn(OUT, 1,"  Change source of control? (y/n)");
+      EnterChar(OUT);
+      if(incomingByte==89 || incomingByte==121){
+        EnableGroupPrefix=false;
+          EEPROM.write(4, EnableGroupPrefix);
+          EEPROM.commit();
+        EnableGroupButton=false;
+          EEPROM.write(5, EnableGroupButton);
+          EEPROM.commit();
+        TxUdpBuffer[2] = 'o';
+        EEPROM.write(0, 'o'); // address, value
         EEPROM.commit();
-      EnableGroupButton=false;
-        EEPROM.write(5, EnableGroupButton);
-        EEPROM.commit();
-      TxUdpBuffer[2] = 'o';
-      EEPROM.write(0, 'o'); // address, value
-      EEPROM.commit();
-      Prn(OUT, 1,"Now control from: Open Interface III");
-      if(EnableSerialDebug==1){
-        Prn(OUT, 0,"EEPROM read [");
-        Prn(OUT, 0, String(EEPROM.read(0)) );
-        Prn(OUT, 1,"]");
-      }
-      TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
-      if(TxUdpBuffer[2] == 'm'){
-        TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
+        Prn(OUT, 1,"Now control from: Open Interface III");
+        if(EnableSerialDebug==1){
+          Prn(OUT, 0,"EEPROM read [");
+          Prn(OUT, 0, String(EEPROM.read(0)) );
+          Prn(OUT, 1,"]");
+        }
+        TxUDP('s', packetBuffer[2], 'b', 'r', 'o', 0);    // 0=broadcast, 1= direct to RX IP
+        if(TxUdpBuffer[2] == 'm'){
+          TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
+        }
       }
 
     // n
     }else if(incomingByte==110){
-      EnableGroupPrefix=false;
-      EEPROM.write(4, EnableGroupPrefix);
-      EnableGroupButton=false;
-      EEPROM.write(5, EnableGroupButton);
-      TxUdpBuffer[2] = 'n';
-      EEPROM.write(0, 'n'); // address, value
-      EEPROM.commit();
-      Prn(OUT, 1,"Now control from: none");
-
-    // ?
-    }else if(incomingByte==63){
-      ListCommands(OUT);
+      Prn(OUT, 1,"  Change source of control? (y/n)");
+      EnterChar(OUT);
+      if(incomingByte==89 || incomingByte==121){
+        EnableGroupPrefix=false;
+        EEPROM.write(4, EnableGroupPrefix);
+        EnableGroupButton=false;
+        EEPROM.write(5, EnableGroupButton);
+        TxUdpBuffer[2] = 'n';
+        EEPROM.write(0, 'n'); // address, value
+        EEPROM.commit();
+        Prn(OUT, 1,"Now control from: none");
+      }
 
     // w
     }else if(incomingByte==119 && TxUdpBuffer[2]!='n'){
-      Prn(OUT, 1,"Write reboot watchdog in minutes (0-10080), 0-disable");
+      Prn(OUT, 1,"Input reboot watchdog in minutes (0-10080), 0-disable and press [enter]");
       Prn(OUT, 1,"recomended 1440 (1 day)");
-      EnterInt(OUT);
-      if(CompareInt>=0 && CompareInt<=10080){
-        RebootWatchdog = CompareInt;
+      Enter();
+      for (int i=InputByte[0]; i>0; i--){
+        intBuf = intBuf + ((InputByte[i]-48)*mult);
+        mult = mult*10;
+      }
+      if(intBuf>=0 && intBuf<=10080){
+        RebootWatchdog = intBuf;
         EEPROM.writeUInt(26, RebootWatchdog);
         EEPROM.commit();
         Prn(OUT, 0," Set ");
@@ -630,11 +1340,15 @@ void CLI(){
 
     // W
     }else if(incomingByte==87 && TxUdpBuffer[2]!='n'){
-      Prn(OUT, 1,"Write clear output watchdog in minutes (0-10080), 0-disable");
+      Prn(OUT, 1,"Input clear output watchdog in minutes (0-10080), 0-disable and press [enter]");
       Prn(OUT, 1,"note: if you need clear output after reboot watchdog, set smaller than it");
-      EnterInt(OUT);
-      if(CompareInt>=0 && CompareInt<=10080){
-        OutputWatchdog = CompareInt;
+      Enter();
+      for (int i=InputByte[0]; i>0; i--){
+        intBuf = intBuf + ((InputByte[i]-48)*mult);
+        mult = mult*10;
+      }
+      if(intBuf>=0 && intBuf<=10080){
+        OutputWatchdog = intBuf;
         EEPROM.writeUInt(30, OutputWatchdog);
         EEPROM.commit();
         Prn(OUT, 0," Set ");
@@ -646,10 +1360,14 @@ void CLI(){
 
     // <
     }else if(incomingByte==60 && TxUdpBuffer[2]!='n'){
-      Prn(OUT, 1,"write UDP port (1-65535)");
-      EnterInt(OUT);
-      if(CompareInt>=1 && CompareInt<=65535){
-        IncomingSwitchUdpPort = CompareInt;
+      Prn(OUT, 1,"write UDP port (1-65535) and press [enter]");
+      Enter();
+      for (int i=InputByte[0]; i>0; i--){
+        intBuf = intBuf + ((InputByte[i]-48)*mult);
+        mult = mult*10;
+      }
+      if(intBuf>=1 && intBuf<=65535){
+        IncomingSwitchUdpPort = intBuf;
         EEPROM.writeInt(22, IncomingSwitchUdpPort);
         EEPROM.commit();
         Prn(OUT, 0," Set ");
@@ -664,10 +1382,14 @@ void CLI(){
 
     // /
     }else if(incomingByte==47 && TxUdpBuffer[2] == 'm'){
-      Prn(OUT, 1,"write encoder rannge number (2-16)");
-      EnterInt(OUT);
-      if(CompareInt>=2 && CompareInt<=16){
-        NumberOfEncoderOutputs = CompareInt;
+      Prn(OUT, 1,"write encoder rannge number (2-16) and press [enter]");
+      Enter();
+      for (int i=InputByte[0]; i>0; i--){
+        intBuf = intBuf + ((InputByte[i]-48)*mult);
+        mult = mult*10;
+      }
+      if(intBuf>=2 && intBuf<=16){
+        NumberOfEncoderOutputs = intBuf;
 /*      EnterChar(OUT);
       // 2-G
       if( (incomingByte>=50 && incomingByte<=57) || (incomingByte>=97 && incomingByte<=103) ){
@@ -760,7 +1482,7 @@ void CLI(){
       }
 
     // +
-    #if !defined(Ser2net)
+    #if !defined(Ser2net) && !defined(XLswitch)
     }else if(incomingByte==43 && TxUdpBuffer[2]!='n'){
       HW_BCD_SW=!HW_BCD_SW;
       Prn(OUT, 0,"** Net ID sufix by ");
@@ -859,6 +1581,27 @@ void CLI(){
       }else{
         Prn(OUT, 1," accepts 0-f, exit");
       }
+      // E
+    }else if(incomingByte==69 && OUT==0){
+        Prn(OUT, 1,"  Erase whole eeprom (also telnet key)? (y/n)");
+        EnterChar(OUT);
+        if(incomingByte==89 || incomingByte==121){
+          Prn(OUT, 1,"  Stop erase? (y/n)");
+          EnterChar(OUT);
+          if(incomingByte==78 || incomingByte==110){
+            for(int i=0; i<EEPROM_SIZE; i++){
+              EEPROM.write(i, 0xff);
+              Prn(OUT, 0,".");
+            }
+            EEPROM.commit();
+            Prn(OUT, 1,"");
+            Prn(OUT, 1,"  Eeprom erased done");
+          }else{
+            Prn(OUT, 1,"  Erase aborted");
+          }
+        }else{
+          Prn(OUT, 1,"  Erase aborted");
+        }
 
     // $
     }else if(incomingByte==36){
@@ -901,11 +1644,16 @@ void CLI(){
       }
 
     // (
+    #if defined(Ser2net) || defined(XLswitchCIV)
     }else if(incomingByte==40){
-      Prn(OUT, 1,"Write baudrate");
-      EnterInt(OUT);
-      if(CompareInt>=80 && CompareInt<=5000000){
-        SERIAL1_BAUDRATE = CompareInt;
+      Prn(OUT, 1,"Write baudrate and press [enter]");
+      Enter();
+      for (int i=InputByte[0]; i>0; i--){
+        intBuf = intBuf + ((InputByte[i]-48)*mult);
+        mult = mult*10;
+      }
+      if(intBuf>=80 && intBuf<=5000000){
+        SERIAL1_BAUDRATE = intBuf;
         EEPROM.writeInt(14, SERIAL1_BAUDRATE);
         EEPROM.commit();
         Prn(OUT, 0," Set ");
@@ -917,13 +1665,19 @@ void CLI(){
       }else{
         Prn(OUT, 0,"Out of range.");
       }
+    #endif
 
     // )
+    #if defined(Ser2net) && !defined(XLswitch)
     }else if(incomingByte==41){
-      Prn(OUT, 1,"Write IP port (1-65535)");
-      EnterInt(OUT);
-      if(CompareInt>=1 && CompareInt<=65535){
-        SerialServerIPport = CompareInt;
+      Prn(OUT, 1,"Write IP port (1-65535) and press [enter]");
+      Enter();
+      for (int i=InputByte[0]; i>0; i--){
+        intBuf = intBuf + ((InputByte[i]-48)*mult);
+        mult = mult*10;
+      }
+      if(intBuf>=1 && intBuf<=65535){
+        SerialServerIPport = intBuf;
         EEPROM.writeInt(18, SerialServerIPport);
         EEPROM.commit();
         Prn(OUT, 0," Set ");
@@ -935,6 +1689,7 @@ void CLI(){
       }else{
         Prn(OUT, 0,"Out of range.");
       }
+    #endif
 
     // &
     }else if(incomingByte==38 && TxUdpBuffer[2]!='n'){
@@ -977,6 +1732,10 @@ void CLI(){
       TelnetServerClients[0].stop();
       ESP.restart();
 
+    // LF
+    }else if(incomingByte==10){
+      Prn(OUT, 1,"");
+
     // anykey
     }else{
       Prn(OUT, 0," [");
@@ -987,7 +1746,70 @@ void CLI(){
     incomingByte=0;
   }
 }
+//-------------------------------------------------------------------------------------------------------
+void Enter(){
+  int OUT;
+  if(TelnetAuthorized==true){
+    OUT=1;
+  }else{
+    OUT=0;
+  }
 
+  InputByte[0]=0;
+  incomingByte = 0;
+  bool br=false;
+  Prn(OUT, 0,"> ");
+
+  if(OUT==0){
+    while(br==false) {
+      if(Serial.available()){
+        incomingByte=Serial.read();
+        if(incomingByte==13){
+          br=true;
+          Serial.println("");
+        }else{
+          Serial.write(incomingByte);
+          InputByte[InputByte[0]+1]=incomingByte;
+          InputByte[0]++;
+        }
+        if(InputByte[0]==20){
+          br=true;
+          Prn(OUT, 1," too long");
+        }
+      }
+    }
+
+  }else if(OUT==1){
+    if (TelnetServerClients[0] && TelnetServerClients[0].connected()){
+
+        while(br==false){
+          if(TelnetServerClients[0].available()){
+            incomingByte=TelnetServerClients[0].read();
+            if(incomingByte==13){
+              br=true;
+              Prn(OUT, 1,"");
+            }else{
+              TelnetServerClients[0].write(incomingByte);
+              InputByte[InputByte[0]+1]=incomingByte;
+              InputByte[0]++;
+            }
+            if(InputByte[0]==20){
+              br=true;
+              Prn(OUT, 1," too long");
+            }
+          }
+        }
+    }
+  }
+
+  // Serial.println();
+  // for (int i=1; i<InputByte[0]+1; i++){
+    // Serial.write(InputByte[i]);
+  // }
+  // Serial.println();
+
+  // Prn(OUT, 1, "out"+String(CompareInt) );
+}
 //-------------------------------------------------------------------------------------------------------
 void EnterChar(int OUT){
   incomingByte = 0;
@@ -1086,6 +1908,14 @@ void EnterIntOld(int OUT){
 
 //-------------------------------------------------------------------------------------------------------
 void Prn(int OUT, int LN, String STR){
+  if(OUT==3){
+    if(TelnetAuthorized==true){
+      OUT=1;
+    }else{
+      OUT=0;
+    }
+  }
+
   if(OUT==0){
     Serial.print(STR);
     if(LN==1){
@@ -1115,41 +1945,67 @@ void ListCommands(int OUT){
 
   #if defined(ETHERNET)
     Prn(OUT, 1,"");
-    Prn(OUT, 1,"  IP relay ESP32-GATEWAY status");
+    #if defined(XLswitch)
+      Prn(OUT, 1,"  IP XLswitch on ESP32-POE status");
+    #else
+      Prn(OUT, 1,"  IP relay ESP32-GATEWAY status");
+    #endif
     Prn(OUT, 0,"  http://");
     Prn(OUT, 1, String(ETH.localIP()[0])+"."+String(ETH.localIP()[1])+"."+String(ETH.localIP()[2])+"."+String(ETH.localIP()[3]) );
     Prn(OUT, 0,"  ETH  MAC: ");
-    Prn(OUT, 1, String(ETH.macAddress()[0], HEX)+"."+String(ETH.macAddress()[1], HEX)+"."+String(ETH.macAddress()[2], HEX)+"."+String(ETH.macAddress()[3], HEX)+"."+String(ETH.macAddress()[4], HEX)+"."+String(ETH.macAddress()[5], HEX) );
+    Prn(OUT, 0, String(ETH.macAddress()[0], HEX)+"."+String(ETH.macAddress()[1], HEX)+"."+String(ETH.macAddress()[2], HEX)+"."+String(ETH.macAddress()[3], HEX)+"."+String(ETH.macAddress()[4], HEX)+"."+String(ETH.macAddress()[5], HEX) );
     Prn(OUT, 0,"  ");
     Prn(OUT, 0, String(ETH.linkSpeed()) );
     Prn(OUT, 0,"Mbps");
     if (ETH.fullDuplex()) {
       Prn(OUT, 0,", FULL_DUPLEX ");
     }
-    Prn(OUT, 1, "");
-    // Serial.println();
   #else
     Prn(OUT, 1,"  ETHERNET OFF");
   #endif
   #if defined(WIFI)
     Prn(OUT, 1,"  =================================");
-    Prn(OUT, 1,"  http://");
+    Prn(OUT, 0,"  http://");
     Prn(OUT, 1, String(WiFi.localIP()[0])+"."+String(WiFi.localIP()[1])+"."+String(WiFi.localIP()[2])+"."+String(WiFi.localIP()[3]) );
-    Prn(OUT, 1,"  dBm: ");
+    Prn(OUT, 0,"  dBm: ");
     Prn(OUT, 1, String(WiFi.RSSI()) );
   #else
-    Prn(OUT, 1,"  WIFI OFF");
+    Prn(OUT, 1,"| WIFI OFF");
+  #endif
+  Prn(OUT, 0,"  OTA ");
+  #if defined(EnableOTA)
+    Prn(OUT, 0,"enable, password: ");
+    Prn(OUT, 1, otaPassword);
+  #else
+    Prn(OUT, 1,"disable");
   #endif
   if(TxUdpBuffer[2]!='n'){
-    Prn(OUT, 0,"  Key number: ");
-    Prn(OUT, 1,String(keyNumber));
+    // Serial.print("  Key: ");
+    // Serial.println(String(key));
+    if(OUT==0){
+      Prn(OUT, 1,"  Key for telnet access:");
+      Prn(OUT, 0,"    ");
+      for(int i=0; i<100; i++){
+        Prn(OUT, 0, String(key[i]));
+        if((i+1)%10==0){
+          Prn(OUT, 0," ");
+        }
+      }
+      Prn(OUT, 1,"");
+    }
     Prn(OUT, 1,"  =================================");
     Prn(OUT, 0,"  Device NET-ID: 0x");
-    if(NET_ID <=0x0f){
-      Prn(OUT, 0,"0");
-    }
-    Prn(OUT, 0, String(NET_ID, HEX) );
-    #if !defined(Ser2net)
+    // if(NET_ID <=0x0f){
+    //   Prn(OUT, 0,"0");
+    // }
+    // Prn(OUT, 0, String(NET_ID, HEX) );
+    // if(EnableGroupPrefix==false){
+      Prn(OUT, 0, String(IdPrefix(NET_ID), HEX) );
+    // }else{
+      // Prn(OUT, 0, "_");
+    // }
+    Prn(OUT, 0, String(IdSufix(NET_ID), HEX) );
+    #if !defined(Ser2net) && !defined(XLswitch)
       if(HW_BCD_SW==true){
         Prn(OUT, 0," [BCD-");
         for (int i = 0; i < 4; i++) {
@@ -1159,6 +2015,11 @@ void ListCommands(int OUT){
       }
     #endif
     Prn(OUT, 1,"");
+    if(EnableGroupPrefix==true){
+      Prn(OUT, 1,"  NOTE: If activate Multi control");
+      Prn(OUT, 1,"        - ID prefix identifies individual controllers");
+      Prn(OUT, 1,"        - ID sufix same at all (relay and also control) devices - one group");
+    }
     Prn(OUT, 1,"  =================================");
   }
   if(EnableGroupPrefix==false){
@@ -1200,12 +2061,26 @@ void ListCommands(int OUT){
     Prn(OUT, 0,"      m ");
   }
   Prn(OUT, 1,"- IP switch master");
-  if(TxUdpBuffer[2]=='r'){
-    Prn(OUT, 0,"     [r]");
-  }else{
-    Prn(OUT, 0,"      r ");
-  }
-  Prn(OUT, 1,"- Band decoder");
+  #if defined(XLswitchCIV) && defined(XLswitch)
+    if(TxUdpBuffer[2]=='I'){
+      Prn(OUT, 0,"     [I]");
+    }else{
+      Prn(OUT, 0,"      I ");
+    }
+    Prn(OUT, 1,"- Icom CI-V");
+  #endif
+  // if(TxUdpBuffer[2]=='r'){
+  //   Prn(OUT, 0,"     [r]");
+  // }else{
+  //   Prn(OUT, 0,"      r ");
+  // }
+  // Prn(OUT, 1,"- Band decoder");
+  // if(TxUdpBuffer[2]=='e'){
+  //   Prn(OUT, 0,"     [e]");
+  // }else{
+  //   Prn(OUT, 0,"      e ");
+  // }
+  // Prn(OUT, 1,"- Meter");
   if(TxUdpBuffer[2]=='o'){
     Prn(OUT, 0,"     [o]");
   }else{
@@ -1268,7 +2143,7 @@ void ListCommands(int OUT){
     }else{
       Prn(OUT, 1,"[OFF]");
     }
-  #if !defined(Ser2net)
+  #if !defined(Ser2net) && !defined(XLswitch)
     if(TxUdpBuffer[2]!='n'){
       Prn(OUT, 0,"      +  net ID sufix by ");
       if(HW_BCD_SW==true){
@@ -1322,10 +2197,12 @@ void ListCommands(int OUT){
       Prn(OUT, 1,"      .  list detected IP switch (multi control)");
     }
   }
-  #if defined(Ser2net)
+  #if defined(Ser2net) || defined(XLswitchCIV)
     Prn(OUT, 0,"      (  change serial1 baudrate [");
     Prn(OUT, 0, String(SERIAL1_BAUDRATE) );
     Prn(OUT, 1,"]");
+  #endif
+  #if defined(Ser2net) && !defined(XLswitch)
     Prn(OUT, 0,"      )  change ser2net IP port [");
     Prn(OUT, 0, String(SerialServerIPport) );
     Prn(OUT, 1,"]");
@@ -1339,9 +2216,22 @@ void ListCommands(int OUT){
     Prn(OUT, 1,"]");
     Prn(OUT, 1,"      Q  logout with erase your IP from memory and close telnet");
   }
-  Prn(OUT, 1,"      @  restart IP switch");
+  Prn(OUT, 1,"      E  erase whole eeprom (telnet key also)");
+  Prn(OUT, 1,"      @  restart device");
   Prn(OUT, 1,"---------------------------------------------");
 }
+//-------------------------------------------------------------------------------------------------------
+char RandomChar(){
+    int R = random(48, 122);
+    if(R>=58 && 64>=R){
+      R=R-random(7, 10);
+    }
+    if(R>=91 && 96>=R){
+      R=R+random(6, 26);
+    }
+    return char(R);
+}
+
 //-------------------------------------------------------------------------------------------------------
 
 void Demo(){
@@ -1398,7 +2288,7 @@ void Demo(){
 
 byte GetBoardId(){
   byte NETID = 0;
-  #if !defined(Ser2net)
+  #if !defined(Ser2net) && !defined(XLswitch)
     if(digitalRead(BCD[0])==0){
       NETID = NETID | (1<<0);    // Set the n-th bit
     }
@@ -1543,7 +2433,7 @@ void RX_UDP(){
           Serial.print(":");
           Serial.println(UdpCommand.remotePort());
         }
-        #if !defined(Ser2net)
+        #if !defined(Ser2net) && !defined(XLswitch)
           pinMode(BCD[1], OUTPUT);
           digitalWrite(BCD[1], HIGH);
           delay(100);
@@ -1610,6 +2500,11 @@ void RX_UDP(){
           DetectedRemoteSwPort[hexToDecBy4bit(IdPrefix(packetBuffer[0]))]=UdpCommand.remotePort();
         }
         TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
+        #if defined(XLswitchCIV) && defined(XLswitch)
+          if(TxUdpBuffer[2]=='m'){
+            LcdNeedRefresh=2;
+          }
+        #endif
       }
       WatchdogTimer=millis();
       // activate
@@ -1623,6 +2518,13 @@ void RX_UDP(){
       }
     }
     memset(packetBuffer, 0, sizeof(packetBuffer));   // Clear contents of Buffer
+
+    #if defined(XLswitch)
+      digitalWrite(StatusLedBPin, HIGH);
+      StatusLedB = true;
+      StatusLedBTimer[0]=millis();
+    #endif
+
   } //end IfUdpPacketSice
 }
 //-------------------------------------------------------------------------------------------------------
@@ -1876,6 +2778,11 @@ void http(){
     if(EnableSerialDebug==1){
       Serial.println("WIFI New client");
     }
+    #if defined(XLswitch)
+      digitalWrite(StatusLedBPin, HIGH);
+      StatusLedB = true;
+      StatusLedBTimer[0]=millis();
+    #endif
     memset(linebuf,0,sizeof(linebuf));
     charcount=0;
     // an http request ends with a blank line
@@ -2066,8 +2973,8 @@ void http(){
           client.print(F(" | Uptime: "));
           client.print(millis()/1000);
           client.println(F(" s<br>"));
-          #if defined(Ser2net)
-            client.println(F(" s<br>Ser2net: ip port "));
+          #if defined(Ser2net) && !defined(XLswitch)
+            client.println(F(" Ser2net: ip port "));
             client.print(SerialServerIPport);
             client.print(" &#8644; baudrate ");
             client.print(SERIAL1_BAUDRATE);
@@ -2135,6 +3042,7 @@ void http(){
                   client.print("</pre>");
             }
 
+          client.println(F("<p><a href=\"https://remoteqth.com/wiki/index.php?page=IP+Switch+with+ESP32-GATEWAY#Web_status_page\"> Wiki</a> | "));
           client.println(F("<p><a href=\".\" onclick=\"window.open( this.href, this.href, 'width=400,height=180,left=0,top=0,menubar=no,location=no,status=no' ); return false;\" > split&#8599;</a></p>"));
           client.println(F("</body></html>"));
 
@@ -2197,7 +3105,10 @@ void EthEvent(WiFiEvent_t event)
       Serial.print(ETH.linkSpeed());
       Serial.println("Mbps");
       eth_connected = true;
-      #if !defined(Ser2net)
+      #if defined(XLswitch)
+        digitalWrite(StatusLedAPin, HIGH);
+      #endif
+      #if !defined(Ser2net) && !defined(XLswitch)
         pinMode(BCD[1], OUTPUT);
         digitalWrite(BCD[1], HIGH);
         delay(100);
@@ -2241,15 +3152,22 @@ void EthEvent(WiFiEvent_t event)
         TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
       }
       // EnableSerialDebug=0;
+      LcdNeedRefresh=100;
       break;
 
     case SYSTEM_EVENT_ETH_DISCONNECTED:
       Serial.println("ETH  Disconnected");
       eth_connected = false;
+      #if defined(XLswitch)
+        digitalWrite(StatusLedAPin, LOW);
+      #endif
       break;
     case SYSTEM_EVENT_ETH_STOP:
       Serial.println("ETH  Stopped");
       eth_connected = false;
+      #if defined(XLswitch)
+        digitalWrite(StatusLedAPin, LOW);
+      #endif
       break;
     default:
       break;
@@ -2483,7 +3401,7 @@ void Telnet(){
 //-------------------------------------------------------------------------------------------------------
 
 void SerialToIp(){
-  #if defined(Ser2net)
+  #if defined(Ser2net) && !defined(XLswitch)
   uint8_t i;
   // if (wifiMulti.run() == WL_CONNECTED) {
   if (eth_connected==true) {
@@ -2605,4 +3523,99 @@ Vypinaci Paket
     delay(1000);
   }
   #endif
+}
+
+//-------------------------------------------------------------------------------------------------------
+
+unsigned long testFastLines(uint16_t color1, uint16_t color2) {
+  unsigned long start;
+  int           x, y, w = tft.width(), h = tft.height();
+
+  tft.fillScreen(ILI9341_BLACK);
+  start = micros();
+  for(y=0; y<h; y+=5) tft.drawFastHLine(0, y, w, color1);
+  for(x=0; x<w; x+=5) tft.drawFastVLine(x, 0, h, color2);
+
+  return micros() - start;
+}
+
+unsigned long testFilledRects(uint16_t color1, uint16_t color2) {
+  unsigned long start, t = 0;
+  int           n, i, i2,
+                cx = tft.width()  / 2 - 1,
+                cy = tft.height() / 2 - 1;
+
+  tft.fillScreen(ILI9341_BLACK);
+  n = min(tft.width(), tft.height());
+  for(i=n; i>0; i-=6) {
+    i2    = i / 2;
+    start = micros();
+    tft.fillRect(cx-i2, cy-i2, i, i, color1);
+    t    += micros() - start;
+    // Outlines are not included in timing results
+    tft.drawRect(cx-i2, cy-i2, i, i, color2);
+    yield();
+  }
+
+  return t;
+}
+
+bool Get_yes_no(void){
+TS_Point p;
+    tft.setTextColor(ILI9341_WHITE);  tft.setTextSize(3);
+
+    tft.fillRoundRect(20,250, 100, 50,8, ILI9341_RED);
+    tft.setCursor(56, 265);
+    tft.println("NO");
+    tft.drawRoundRect(20,250, 100, 50, 8, ILI9341_WHITE);
+
+    tft.fillRoundRect(120,250, 100, 50,8, ILI9341_GREEN);
+    tft.setCursor(144, 265);
+    tft.println("YES");
+    tft.drawRoundRect(120,250, 100, 50, 8, ILI9341_WHITE);
+
+
+while (1){
+      delay(50);
+    p = ts.getPoint();
+
+    if (p.z != 129){
+
+
+      p.x = map(p.x, TS_MINX, TS_MAXX, 0, tft.width());
+      p.y = map(p.y, TS_MINY, TS_MAXY, 0, tft.height());
+      p.y = 320 - p.y;
+
+      //  tft.fillCircle(p.x, p.y, 5, ILI9341_YELLOW);
+
+
+    if ((p.y > 250) && (p.y<300)){
+
+      if ((p.x> 20) && (p.x < 220)){
+            if (p.x>120)
+            {
+              tft.fillRoundRect(120,250, 100, 50,8, ILI9341_OLIVE);
+              tft.setCursor(144, 265);
+              tft.println("YES");
+              tft.drawRoundRect(120,250, 100, 50, 8, ILI9341_WHITE);
+
+              delay(500);
+              return true;
+            }
+                   else{
+
+                     tft.fillRoundRect(20,250, 100, 50,8, ILI9341_OLIVE);
+                     tft.setCursor(56, 265);
+                     tft.println("NO");
+                     tft.drawRoundRect(20,250, 100, 50, 8, ILI9341_WHITE);
+
+                        delay(500);
+                     return false;
+                   }
+       }
+
+    }
+
+  }
+}
 }
