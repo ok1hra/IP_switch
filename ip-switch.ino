@@ -57,19 +57,22 @@ ToDo
 - telnet inactivity watchdog > close
 - custom name for outputs
 - https://github.com/espressif/arduino-esp32/blob/master/libraries/Update/examples/AWS_S3_OTA_Update/AWS_S3_OTA_Update.ino
+- https://randomnerdtutorials.com/esp32-esp8266-relay-web-server/
 */
 //-------------------------------------------------------------------------------------------------------
 
 // #define PCBrev04                    // Enable for ESP32-GATEWAY PCB revision 0.4 or later
-#define XLswitch                       // Enable for XL switch hardware with ESP32-POE
-const char* REV = "20200321";
+// #define XLswitch                       // Enable for XL switch hardware with ESP32-POE
+const char* REV = "20200405";
 const char* otaPassword = "remoteqth";
 
 //-------------------------------------------------------------------------------------------------------
 
-#define XLswitchANT 16                   // number of antenna output
-#define XLswitchTRX 2                   // number of trx output
-#define XLswitchCIV           // Icom CIV
+int XLswitchANT = 16;                  // number of antenna output
+int XLswitchTRX = 4;                   // number of trx output
+byte XLswitchOutputs[4][2];          // 4 trx, 2 byte = 16 bit
+
+// #define XLswitchCIV           // Icom CIV
 #if defined(XLswitchCIV)
   #define REQUEST        500    // [ms] use TXD output for sending frequency request
   #define CIV_ADRESS    0x56    // CIV input HEX Icom adress (0x is prefix)
@@ -117,13 +120,6 @@ const char* otaPassword = "remoteqth";
 // #define WIFI                        // Enable ESP32 WIFI (DHCP IPv4)
 const char* ssid     = "";
 const char* password = "";
-
-// const char* ssid     = "h";
-// const char* password = "x7T1/aiXfr";
-// KEY=20 && keystring=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 100 | head -n 1) && echo $KEY-$keystring >> key-log.txt && echo $keystring | sed 's/.\{10\}/& |\n/g' | nl -i 10 -n rn -s " | " | sed '1s/^/          Key #'"$KEY"'\n\n/' | enscript -B -p output.ps && ps2pdf output.ps key-$KEY.pdf && gvfs-open key-$KEY.pdf
-// How to generate new key
-// cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 100 | head -n 1
-
 char key[100];
 byte InputByte[21];
 #define Ser2net                  // Serial to ip proxy - DISABLE if board revision 0.3 or lower
@@ -234,9 +230,12 @@ String HTTP_req;
   const int StatusLedAPin = 5;
   const int StatusLedBPin = 13;
   bool StatusLedB = false;
-  bool StatusLedBTimer[2] = {0,500};
+  long StatusLedBTimer[2] = {0,500};
   int LcdNeedRefresh = 100;
 
+  long LcdFpsTestTimer[2] = {0,1};
+  int LcdFpsTestCounter[2]={0,0};
+  bool LcdFpsTestForward=true;
 // https://learn.adafruit.com/adafruit-gfx-graphics-library/using-fonts
 
   /***************************************************
@@ -376,6 +375,7 @@ void setup() {
     //uint8_t x = tft.readcommand8(ILI9341_RDMODE);
     delay(1000);
     ts.begin(TS_I2C_ADDRESS);
+    tft.fillScreen(ILI9341_BLACK);
   #endif
 
   // Listen source
@@ -620,6 +620,9 @@ void setup() {
       })
       .onEnd([]() {
         Serial.println("\nEnd");
+        #if defined(XLswitch)
+          tft.fillScreen(ILI9341_BLACK);
+        #endif
       })
       .onProgress([](unsigned int progress, unsigned int total) {
         Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
@@ -661,6 +664,7 @@ void loop() {
   SerialToIp();
   http();
   RX_UDP();
+  RX_UDP_XLswitch();
   CLI();
   Telnet();
   CheckNetId();
@@ -668,6 +672,7 @@ void loop() {
   Watchdog();
   CIV();
   LcdDisplay();
+  // LcdFpsTest();
   #if defined(EnableOTA)
    ArduinoOTA.handle();
   #endif
@@ -842,51 +847,124 @@ void CIV(){
 
 //-------------------------------------------------------------------------------------------------------
 
-void LcdDisplay() {
-  #if defined(XLswitchCIV) && defined(XLswitch)
-    if(LcdNeedRefresh>0){
+#if defined(XLswitch)
+  void LcdFpsTest() {
+    // tft.fillScreen(ILI9341_BLACK);
+    tft.setRotation(1);
 
+    // if(millis()-LcdFpsTestTimer[0]>LcdFpsTestTimer[1]){
+    //   tft.setTextColor(ILI9341_WHITE);
+    //   tft.fillRect(80, 30, 200, 30, ILI9341_BLACK);
+    //   tft.setCursor(80,30);
+    //   tft.setTextSize(4);
+    //   tft.print("fps ");
+    //   tft.print(LcdFpsTestCounter[0]);
+    //   LcdFpsTestTimer[0]=millis();
+    //   LcdFpsTestCounter[0]=0;
+    // }
+    //
+    // // tft.drawRect(57, 150, 206, 16, ILI9341_WHITE);
+    // tft.fillRect(60+LcdFpsTestCounter[1], 153, 1, 10, ILI9341_WHITE);
+    //
+    // tft.fillRect(60+(200-LcdFpsTestCounter[1]), 183, 2, 10, ILI9341_WHITE);
+    // tft.fillRect(60+(200-LcdFpsTestCounter[1])+2, 183, 2, 10, ILI9341_BLACK);
+    // LcdFpsTestCounter[0]++;
+    // LcdFpsTestCounter[1]++;
+    // if(LcdFpsTestCounter[1]>200){
+    //   tft.fillRect(57, 150, 206, 16, ILI9341_BLACK);
+    //   tft.fillRect(57, 180, 206, 16, ILI9341_BLACK);
+    //   LcdFpsTestCounter[1]=0;
+    // }
+
+
+
+    if(LcdFpsTestCounter[0]>2 || LcdFpsTestCounter[0]<1){
+      LcdFpsTestForward=!LcdFpsTestForward;
+    }
+    if(LcdFpsTestForward==true){
+      LcdFpsTestCounter[0]--;
+    }else{
+      LcdFpsTestCounter[0]++;
+    }
+      tft.setTextColor(ILI9341_WHITE);
+      tft.fillRect(80, 30, 200, 30, ILI9341_BLACK);
+      tft.setCursor(80,30);
+      tft.setTextSize(4);
+      tft.print(LcdFpsTestCounter[0]);
+      tft.print(" ms");
+
+
+      tft.fillRect(57, 150, 206, 16, ILI9341_BLACK);
+      for (int i = 0; i < 200; i++) {
+        tft.fillRect(60+i, 153, 1, 10, ILI9341_WHITE);
+        tft.fillRect(60+200-i, 183, 1, 10, ILI9341_WHITE);
+        delay(LcdFpsTestCounter[0]);
+      }
+      for (int i = 200; i > 0; i--) {
+        tft.fillRect(60+i, 153, 1, 10, ILI9341_BLACK);
+        tft.fillRect(60+200-i, 183, 1, 10, ILI9341_BLACK);
+        delay(LcdFpsTestCounter[0]);
+      }
+
+  }
+#endif
+//-------------------------------------------------------------------------------------------------------
+
+void LcdDisplay() { // 320x240 px
+  #if defined(XLswitch)
+    if(LcdNeedRefresh>0){
+      int LineSpace = (226-18)/XLswitchTRX;
+      int RowSpace = 320/XLswitchANT;
+
+
+      // default
       if(LcdNeedRefresh==100){
         // Clear Screen
         tft.fillScreen(ILI9341_BLACK);
-
         tft.setRotation(1);
+
+        tft.fillRect(0, 0, 320, 18, ILI9341_DARKGREY);
         tft.setTextColor(ILI9341_ORANGE);
         tft.setCursor(0,0);
-        tft.setTextSize(3);
+        tft.setTextSize(2);
         tft.print("XLswitch");
         if(TxUdpBuffer[2]=='I'){
-          tft.setCursor(240,0);
+          tft.setCursor(260,0);
           tft.setTextColor(ILI9341_LIGHTGREY);
-          tft.setTextSize(3);
+          tft.setTextSize(2);
           tft.print("Icom");
         }else{
-          tft.setCursor(230,0);
+          tft.setCursor(250,0);
           tft.setTextColor(ILI9341_LIGHTGREY);
-          tft.setTextSize(3);
+          tft.setTextSize(2);
           tft.print("ID-");
           tft.print(String(IdPrefix(NET_ID), HEX) );
           tft.print(String(IdSufix(NET_ID), HEX) );
         }
-        tft.drawLine(0,28,340,28, ILI9341_LIGHTGREY);
+        // tft.drawLine(0,18,340,18, ILI9341_LIGHTGREY);
 
+        // lines + numbers
+        for (int i = 0; i < XLswitchTRX+1; i++) {
+          tft.drawLine(0,18+i*LineSpace,340,18+i*LineSpace, ILI9341_LIGHTGREY);
+          if(i<XLswitchTRX){
+            tft.setTextSize(2);
+            tft.setTextColor(ILI9341_DARKGREY);
+            for (int j = 0; j < XLswitchANT; j++) {
+              if(j<10){
+                tft.setCursor(RowSpace*j-j*5, LineSpace*i+18+6);
+              }else{
+                tft.setCursor(RowSpace*j-9*5+(j-9)*6, LineSpace*i+18+6);
+              }
+              tft.print(j+1);
+              // tft.fillRoundRect(5+j*39, 28+i*space+5, 34, 34, 3, ILI9341_LIGHTGREY);
+              // tft.fillRoundRect(5+j*39, 28+i*space+5+39, 34, 34, 3, ILI9341_LIGHTGREY);
+            }
+          }
+        }
 
-        // lines
-        // int space = (226-28)/XLswitchTRX;
-        // for (int i = 0; i < XLswitchTRX+1; i++) {
-        //   tft.drawLine(0,28+i*space,340,28+i*space, ILI9341_LIGHTGREY);
-        //   if(i<XLswitchTRX){
-        //     for (int j = 0; j < 8; j++) {
-        //       tft.fillRoundRect(5+j*39, 28+i*space+5, 34, 34, 3, ILI9341_LIGHTGREY);
-        //       tft.fillRoundRect(5+j*39, 28+i*space+5+39, 34, 34, 3, ILI9341_LIGHTGREY);
-        //     }
-        //   }
-        // }
-
-
-        tft.drawLine(0,227,340,227, ILI9341_LIGHTGREY);
+        // tft.drawLine(0,227,340,227, ILI9341_LIGHTGREY);
         tft.setCursor(0,230);
-        tft.setTextColor(ILI9341_WHITE);
+        tft.setTextColor(ILI9341_LIGHTGREY);
         tft.setTextSize(1);
         tft.print(String(ETH.localIP()[0])+"."+String(ETH.localIP()[1])+"."+String(ETH.localIP()[2])+"."+String(ETH.localIP()[3]) );
 
@@ -908,10 +986,11 @@ void LcdDisplay() {
 
         tft.setCursor(270,230);
         tft.setTextSize(1);
-        tft.setTextColor(ILI9341_WHITE);
+        tft.setTextColor(ILI9341_LIGHTGREY);
         tft.print(String(REV));
       }
 
+      // CI-V
       if(LcdNeedRefresh==1){
         tft.fillRect(155, 170, 35, 22, ILI9341_BLACK);
         tft.setCursor(155,170);
@@ -933,6 +1012,7 @@ void LcdDisplay() {
         tft.print(" kHz");
       }
 
+      // IP-SW
       if(LcdNeedRefresh==2){
         tft.setTextColor(ILI9341_GREENYELLOW);
         tft.setTextSize(3);
@@ -950,63 +1030,99 @@ void LcdDisplay() {
         tft.print(String(ShiftOutByte[2], BIN));
       }
 
+      // 4x16
+      if(LcdNeedRefresh==3){
+        for (int i = 0; i < XLswitchTRX+1; i++) {
+          if(i<XLswitchTRX){
+            tft.setTextSize(2);
+            for (int j = 0; j < XLswitchANT; j++) {
+              if(j<10){
+                tft.setCursor(RowSpace*j-j*5, LineSpace*i+18+6);
+              }else{
+                tft.setCursor(RowSpace*j-9*5+(j-9)*6, LineSpace*i+18+6);
+              }
+              if(j<8){
+                // byte XLswitchOutputs[4][2];          // 4 trx, 2 byte = 16 bit
+                if(bitRead(XLswitchOutputs[i][0], j)==1){
+                  tft.setTextColor(ILI9341_GREEN);
+                }else{
+                  tft.setTextColor(ILI9341_DARKGREY);
+                }
+              }else{
+                if(bitRead(XLswitchOutputs[i][1], j-8)==1){
+                  tft.setTextColor(ILI9341_GREEN);
+                }else{
+                  tft.setTextColor(ILI9341_DARKGREY);
+                }
+              }
+              tft.print(j+1);
+              // tft.fillRoundRect(5+j*39, 28+i*space+5, 34, 34, 3, ILI9341_LIGHTGREY);
+              // tft.fillRoundRect(5+j*39, 28+i*space+5+39, 34, 34, 3, ILI9341_LIGHTGREY);
+            }
+          }
+        }
+
+      }
+
       LcdNeedRefresh=0;
     }
   #endif
 }
 
-void LcdDisplayOLD() {
-  // This is just a draw some data Demo
+#if defined(XLswitch)
+  void LcdDisplayOLD() {
+    // This is just a draw some data Demo
 
-  // Clear Screen
-  tft.fillScreen(ILI9341_BLACK);
-  // Set some fancy background
-  testFastLines(ILI9341_DARKGREY,ILI9341_DARKCYAN);
+    // Clear Screen
+    tft.fillScreen(ILI9341_BLACK);
+    // Set some fancy background
+    testFastLines(ILI9341_DARKGREY,ILI9341_DARKCYAN);
 
-  // Print "current date and time"
-  tft.setCursor(5,5);
-  tft.setTextColor(ILI9341_WHITE);  tft.setTextSize(2);
-  tft.println("29-05-18      11:28"); //TODO: Print the real date and time
-
-
-  // Print "room temperature"
-  tft.setCursor(85,50);
-  tft.setTextColor(ILI9341_GREEN);  tft.setTextSize(4);
-  tft.println("22");//TODO: Print the real room temperature
-  tft.setCursor(148,50);
-  tft.println("C");
-  tft.drawCircle(138, 54, 4, ILI9341_GREEN);
-  tft.drawCircle(138, 54, 5, ILI9341_GREEN);
-  tft.setCursor(78,85);
-  tft.setTextColor(ILI9341_GREEN);  tft.setTextSize(1);
-  tft.println("ROOM TEMPERATURE");
+    // Print "current date and time"
+    tft.setCursor(5,5);
+    tft.setTextColor(ILI9341_WHITE);  tft.setTextSize(2);
+    tft.println("29-05-18      11:28"); //TODO: Print the real date and time
 
 
-  // Now print Message box wit two yes/no buttons
-  tft.fillRoundRect(10,120, 220, 190, 8, ILI9341_OLIVE);
-  tft.drawRoundRect(10,120, 220, 190, 8, ILI9341_WHITE);
+    // Print "room temperature"
+    tft.setCursor(85,50);
+    tft.setTextColor(ILI9341_GREEN);  tft.setTextSize(4);
+    tft.println("22");//TODO: Print the real room temperature
+    tft.setCursor(148,50);
+    tft.println("C");
+    tft.drawCircle(138, 54, 4, ILI9341_GREEN);
+    tft.drawCircle(138, 54, 5, ILI9341_GREEN);
+    tft.setCursor(78,85);
+    tft.setTextColor(ILI9341_GREEN);  tft.setTextSize(1);
+    tft.println("ROOM TEMPERATURE");
 
-  tft.setTextColor(ILI9341_WHITE);  tft.setTextSize(2);
-  tft.fillRoundRect(20,150, 200, 80,8, ILI9341_BLUE);
-  tft.setCursor(90, 165);
-  tft.println("Save");
-  tft.setCursor(40, 190);
-  tft.println("new settings?");
-  tft.drawRoundRect(20,150, 200, 80, 8, ILI9341_WHITE);
-  // Get the choise
-  bool answer = Get_yes_no();
 
-  if (answer == true)
-  {
-    // Some animation while "write to eeprom"
-  testFilledRects(ILI9341_DARKGREEN,ILI9341_DARKCYAN);
-  tft.setCursor(80, 150);
-  tft.setTextColor(ILI9341_WHITE);  tft.setTextSize(3);
-  tft.println("Done!");
-  } else   tft.fillScreen(ILI9341_RED);
-  // fill screen red to show negative choise
-  delay(1000);
-}
+    // Now print Message box wit two yes/no buttons
+    tft.fillRoundRect(10,120, 220, 190, 8, ILI9341_OLIVE);
+    tft.drawRoundRect(10,120, 220, 190, 8, ILI9341_WHITE);
+
+    tft.setTextColor(ILI9341_WHITE);  tft.setTextSize(2);
+    tft.fillRoundRect(20,150, 200, 80,8, ILI9341_BLUE);
+    tft.setCursor(90, 165);
+    tft.println("Save");
+    tft.setCursor(40, 190);
+    tft.println("new settings?");
+    tft.drawRoundRect(20,150, 200, 80, 8, ILI9341_WHITE);
+    // Get the choise
+    bool answer = Get_yes_no();
+
+    if (answer == true)
+    {
+      // Some animation while "write to eeprom"
+    testFilledRects(ILI9341_DARKGREEN,ILI9341_DARKCYAN);
+    tft.setCursor(80, 150);
+    tft.setTextColor(ILI9341_WHITE);  tft.setTextSize(3);
+    tft.println("Done!");
+    } else   tft.fillScreen(ILI9341_RED);
+    // fill screen red to show negative choise
+    delay(1000);
+  }
+#endif
 
 //-------------------------------------------------------------------------------------------------------
 void Meter(){
@@ -1112,6 +1228,7 @@ void Watchdog(){
       StatusLedB = false;
     }
   #endif
+
 }
 
 //-------------------------------------------------------------------------------------------------------
@@ -1224,7 +1341,7 @@ void CLI(){
       if(TxUdpBuffer[2] == 'm'){
         TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
       }
-      #if defined(XLswitchCIV) && defined(XLswitch)
+      #if defined(XLswitch)
         LcdNeedRefresh=100;
       #endif
     }
@@ -2350,183 +2467,357 @@ RX  0sm:123;
 */
 
 void RX_UDP(){
-  UDPpacketSize = UdpCommand.parsePacket();    // if there's data available, read a packet
-  if (UDPpacketSize){
-    UdpCommand.read(packetBuffer, 10);      // read the packet into packetBufffer
-    // Print RAW
-    if(EnableSerialDebug==1){
-      Serial.println();
-      Serial.print("RXraw [");
-      Serial.print(packetBuffer[0], HEX);
-      for(int i=1; i<8; i++){
-        Serial.print(char(packetBuffer[i]));
+  #if !defined(XLswitch)
+    UDPpacketSize = UdpCommand.parsePacket();    // if there's data available, read a packet
+    if (UDPpacketSize){
+      UdpCommand.read(packetBuffer, 10);      // read the packet into packetBufffer
+      // Print RAW
+      if(EnableSerialDebug==1){
+        Serial.println();
+        Serial.print("RXraw [");
+        Serial.print(packetBuffer[0], HEX);
+        for(int i=1; i<8; i++){
+          Serial.print(char(packetBuffer[i]));
+        }
+        Serial.print(F("] "));
+        Serial.print(UdpCommand.remoteIP());
+        Serial.print(":");
+        Serial.print(UdpCommand.remotePort());
+        Serial.println();
       }
-      Serial.print(F("] "));
-      Serial.print(UdpCommand.remoteIP());
-      Serial.print(":");
-      Serial.print(UdpCommand.remotePort());
-      Serial.println();
-    }
 
-    // ID-FROM-TO filter
-    if(
-      (EnableGroupPrefix==false
-      && String(packetBuffer[0], DEC).toInt()==NET_ID
-      && packetBuffer[1]==TxUdpBuffer[2]  // FROM Switch
-      && packetBuffer[2]== 's'  // TO
-      && packetBuffer[3]== B00000000
-      // && packetBuffer[3]== ':'
-      && packetBuffer[7]== ';')
-      ||
-      (EnableGroupPrefix==true
-      && IdSufix(packetBuffer[0])==IdSufix(NET_ID)
-      && packetBuffer[1]==TxUdpBuffer[2]  // FROM Switch
-      && packetBuffer[2]== 's'  // TO
-      && packetBuffer[3]== B00000000
-      // && packetBuffer[3]== ':'
-      && packetBuffer[7]== ';')
-    ){
-
-      if( EnableGroupPrefix==true && (
-        DetectedRemoteSwPort [IdPrefix(packetBuffer[0])] == 0
-        || (packetBuffer[4]== 'b' && packetBuffer[5]== 'r' && packetBuffer[6]== 'o')
-        || (packetBuffer[4]== 'c' && packetBuffer[5]== 'f' && packetBuffer[6]== 'm')
-        )
+      // ID-FROM-TO filter
+      if(
+        (EnableGroupPrefix==false
+        && String(packetBuffer[0], DEC).toInt()==NET_ID
+        && packetBuffer[1]==TxUdpBuffer[2]  // FROM Switch
+        && packetBuffer[2]== 's'  // TO
+        && packetBuffer[3]== B00000000
+        // && packetBuffer[3]== ':'
+        && packetBuffer[7]== ';')
+        ||
+        (EnableGroupPrefix==true
+        && IdSufix(packetBuffer[0])==IdSufix(NET_ID)
+        && packetBuffer[1]==TxUdpBuffer[2]  // FROM Switch
+        && packetBuffer[2]== 's'  // TO
+        && packetBuffer[3]== B00000000
+        // && packetBuffer[3]== ':'
+        && packetBuffer[7]== ';')
       ){
-        IPAddress TmpAddr = UdpCommand.remoteIP();
-        DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [0]=TmpAddr[0];     // Switch IP addres storage to array
-        DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [1]=TmpAddr[1];
-        DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [2]=TmpAddr[2];
-        DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [3]=TmpAddr[3];
-        DetectedRemoteSwPort [hexToDecBy4bit(IdPrefix(packetBuffer[0]))]=UdpCommand.remotePort();
-        if(EnableSerialDebug==1){
-          Serial.print("Detect controller ID ");
-          Serial.print(IdPrefix(packetBuffer[0]), HEX);
-          Serial.print(" on IP ");
-          Serial.print(DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [0]);
-          Serial.print(".");
-          Serial.print(DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [1]);
-          Serial.print(".");
-          Serial.print(DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [2]);
-          Serial.print(".");
-          Serial.print(DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [3]);
-          Serial.print(":");
-          Serial.println(DetectedRemoteSwPort [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] );
-        }
-        if(TxUdpBuffer[2] == 'm'){
-          TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 1);
-        }
-      }
 
-      // RX Broadcast / CFM
-      if((packetBuffer[4]== 'b' && packetBuffer[5]== 'r' && packetBuffer[6]== 'o')
-        || (packetBuffer[4]== 'c' && packetBuffer[5]== 'f' && packetBuffer[6]== 'm')
+        if( EnableGroupPrefix==true && (
+          DetectedRemoteSwPort [IdPrefix(packetBuffer[0])] == 0
+          || (packetBuffer[4]== 'b' && packetBuffer[5]== 'r' && packetBuffer[6]== 'o')
+          || (packetBuffer[4]== 'c' && packetBuffer[5]== 'f' && packetBuffer[6]== 'm')
+          )
         ){
-        if(EnableSerialDebug==1){
-          Serial.print("RX [");
-          Serial.print(packetBuffer[0], HEX);
-          for(int i=1; i<8; i++){
-            Serial.print(char(packetBuffer[i]));
+          IPAddress TmpAddr = UdpCommand.remoteIP();
+          DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [0]=TmpAddr[0];     // Switch IP addres storage to array
+          DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [1]=TmpAddr[1];
+          DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [2]=TmpAddr[2];
+          DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [3]=TmpAddr[3];
+          DetectedRemoteSwPort [hexToDecBy4bit(IdPrefix(packetBuffer[0]))]=UdpCommand.remotePort();
+          if(EnableSerialDebug==1){
+            Serial.print("Detect controller ID ");
+            Serial.print(IdPrefix(packetBuffer[0]), HEX);
+            Serial.print(" on IP ");
+            Serial.print(DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [0]);
+            Serial.print(".");
+            Serial.print(DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [1]);
+            Serial.print(".");
+            Serial.print(DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [2]);
+            Serial.print(".");
+            Serial.print(DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [3]);
+            Serial.print(":");
+            Serial.println(DetectedRemoteSwPort [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] );
           }
-          Serial.print(F("] "));
-          Serial.print(UdpCommand.remoteIP());
-          Serial.print(":");
-          Serial.println(UdpCommand.remotePort());
-        }
-        #if !defined(Ser2net) && !defined(XLswitch)
-          pinMode(BCD[1], OUTPUT);
-          digitalWrite(BCD[1], HIGH);
-          delay(100);
-          digitalWrite(BCD[1], LOW);
-          delay(100);
-          pinMode(BCD[1], INPUT);
-        #endif
-        if(packetBuffer[4]== 'b' && packetBuffer[5]== 'r' && packetBuffer[6]== 'o'){
-          TxUDP('s', packetBuffer[2], 'c', 'f', 'm', 1);    // 0=broadcast, 1= direct to RX IP
           if(TxUdpBuffer[2] == 'm'){
             TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 1);
           }
         }
 
-      // RX DATA
-      }else{
-        if(EnableGroupButton==true){
-          CheckGroup();
-        }else{
-          ShiftOutByte[0] = String(packetBuffer[4], DEC).toInt();    // Bank0
-        }
-        ShiftOutByte[1] = String(packetBuffer[5], DEC).toInt();    // Bank1
-        ShiftOutByte[2] = String(packetBuffer[6], DEC).toInt();    // Bank2
-
-        // SHIFT OUT
-        #if defined(ShiftOut)
-          digitalWrite(ShiftOutLatchPin, LOW);  // když dáme latchPin na LOW mužeme do registru poslat data
-          shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[2]);
-          shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[1]);
-          shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[0]);
-          digitalWrite(ShiftOutLatchPin, HIGH);    // jakmile dáme latchPin na HIGH data se objeví na výstupu
+        // RX Broadcast / CFM
+        if((packetBuffer[4]== 'b' && packetBuffer[5]== 'r' && packetBuffer[6]== 'o')
+          || (packetBuffer[4]== 'c' && packetBuffer[5]== 'f' && packetBuffer[6]== 'm')
+          ){
           if(EnableSerialDebug==1){
-            Serial.println("ShiftOut");
+            Serial.print("RX [");
+            Serial.print(packetBuffer[0], HEX);
+            for(int i=1; i<8; i++){
+              Serial.print(char(packetBuffer[i]));
+            }
+            Serial.print(F("] "));
+            Serial.print(UdpCommand.remoteIP());
+            Serial.print(":");
+            Serial.println(UdpCommand.remotePort());
           }
-        #endif
+          #if !defined(Ser2net)
+            pinMode(BCD[1], OUTPUT);
+            digitalWrite(BCD[1], HIGH);
+            delay(100);
+            digitalWrite(BCD[1], LOW);
+            delay(100);
+            pinMode(BCD[1], INPUT);
+          #endif
+          if(packetBuffer[4]== 'b' && packetBuffer[5]== 'r' && packetBuffer[6]== 'o'){
+            TxUDP('s', packetBuffer[2], 'c', 'f', 'm', 1);    // 0=broadcast, 1= direct to RX IP
+            if(TxUdpBuffer[2] == 'm'){
+              TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 1);
+            }
+          }
 
+        // RX DATA
+        }else{
+          if(EnableGroupButton==true){
+            CheckGroup();
+          }else{
+            ShiftOutByte[0] = String(packetBuffer[4], DEC).toInt();    // Bank0
+          }
+          ShiftOutByte[1] = String(packetBuffer[5], DEC).toInt();    // Bank1
+          ShiftOutByte[2] = String(packetBuffer[6], DEC).toInt();    // Bank2
+
+          // SHIFT OUT
+          #if defined(ShiftOut)
+            digitalWrite(ShiftOutLatchPin, LOW);  // když dáme latchPin na LOW mužeme do registru poslat data
+            shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[2]);
+            shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[1]);
+            shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[0]);
+            digitalWrite(ShiftOutLatchPin, HIGH);    // jakmile dáme latchPin na HIGH data se objeví na výstupu
+            if(EnableSerialDebug==1){
+              Serial.println("ShiftOut");
+            }
+          #endif
+
+          if(EnableSerialDebug==1){
+            // Serial.println();
+            Serial.print(F("RX ["));
+            Serial.print(packetBuffer[0], HEX);
+            for(int i=1; i<4; i++){
+              Serial.print(char(packetBuffer[i]));
+            }
+            Serial.print((byte)packetBuffer[4], BIN);
+            Serial.print(F("|"));
+            Serial.print((byte)packetBuffer[5], BIN);
+            Serial.print(F("|"));
+            Serial.print((byte)packetBuffer[6], BIN);
+            Serial.print(F(";] "));
+            Serial.print(UdpCommand.remoteIP());
+            Serial.print(F(":"));
+            Serial.println(UdpCommand.remotePort());
+          }
+          if(UdpCommand.remotePort() != DetectedRemoteSwPort[hexToDecBy4bit(IdPrefix(packetBuffer[0]))] && EnableGroupPrefix==true){
+            // if(EnableSerialDebug==1){
+              Serial.print(F("** Change ip-port ID "));
+              Serial.print(IdPrefix(packetBuffer[0]), HEX);
+              Serial.print(F(" (OLD-"));
+              Serial.print(DetectedRemoteSwPort[hexToDecBy4bit(IdPrefix(packetBuffer[0]))]);
+              Serial.print(F(" NEW-"));
+              Serial.print(UdpCommand.remotePort());
+              Serial.println(F(") **"));
+            // }
+            DetectedRemoteSwPort[hexToDecBy4bit(IdPrefix(packetBuffer[0]))]=UdpCommand.remotePort();
+          }
+          TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
+        }
+        WatchdogTimer=millis();
+        // activate
+        if(OutputWatchdog==123456){
+          OutputWatchdog=EEPROM.readUInt(27);
+        }
+      } // filtered end
+      else{
         if(EnableSerialDebug==1){
-          // Serial.println();
-          Serial.print(F("RX ["));
-          Serial.print(packetBuffer[0], HEX);
-          for(int i=1; i<4; i++){
-            Serial.print(char(packetBuffer[i]));
-          }
-          Serial.print((byte)packetBuffer[4], BIN);
-          Serial.print(F("|"));
-          Serial.print((byte)packetBuffer[5], BIN);
-          Serial.print(F("|"));
-          Serial.print((byte)packetBuffer[6], BIN);
-          Serial.print(F(";] "));
-          Serial.print(UdpCommand.remoteIP());
-          Serial.print(F(":"));
-          Serial.println(UdpCommand.remotePort());
+          Serial.println(F("   Different NET-ID, or bad packet format"));
         }
-        if(UdpCommand.remotePort() != DetectedRemoteSwPort[hexToDecBy4bit(IdPrefix(packetBuffer[0]))] && EnableGroupPrefix==true){
-          // if(EnableSerialDebug==1){
-            Serial.print(F("** Change ip-port ID "));
-            Serial.print(IdPrefix(packetBuffer[0]), HEX);
-            Serial.print(F(" (OLD-"));
-            Serial.print(DetectedRemoteSwPort[hexToDecBy4bit(IdPrefix(packetBuffer[0]))]);
-            Serial.print(F(" NEW-"));
-            Serial.print(UdpCommand.remotePort());
-            Serial.println(F(") **"));
-          // }
-          DetectedRemoteSwPort[hexToDecBy4bit(IdPrefix(packetBuffer[0]))]=UdpCommand.remotePort();
-        }
-        TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
-        #if defined(XLswitchCIV) && defined(XLswitch)
-          if(TxUdpBuffer[2]=='m'){
-            LcdNeedRefresh=2;
-          }
-        #endif
       }
-      WatchdogTimer=millis();
-      // activate
-      if(OutputWatchdog==123456){
-        OutputWatchdog=EEPROM.readUInt(27);
-      }
-    } // filtered end
-    else{
-      if(EnableSerialDebug==1){
-        Serial.println(F("   Different NET-ID, or bad packet format"));
-      }
-    }
-    memset(packetBuffer, 0, sizeof(packetBuffer));   // Clear contents of Buffer
+      memset(packetBuffer, 0, sizeof(packetBuffer));   // Clear contents of Buffer
 
-    #if defined(XLswitch)
-      digitalWrite(StatusLedBPin, HIGH);
-      StatusLedB = true;
-      StatusLedBTimer[0]=millis();
+    } //end IfUdpPacketSice
     #endif
-
-  } //end IfUdpPacketSice
 }
+//-------------------------------------------------------------------------------------------------------
+
+void RX_UDP_XLswitch(){
+  #if defined(XLswitch)
+    UDPpacketSize = UdpCommand.parsePacket();    // if there's data available, read a packet
+    if (UDPpacketSize){
+      UdpCommand.read(packetBuffer, 10);      // read the packet into packetBufffer
+      // Print RAW
+      if(EnableSerialDebug==1){
+        Serial.println();
+        Serial.print("RXraw [");
+        Serial.print(packetBuffer[0], HEX);
+        for(int i=1; i<8; i++){
+          Serial.print(char(packetBuffer[i]));
+        }
+        Serial.print(F("] "));
+        Serial.print(UdpCommand.remoteIP());
+        Serial.print(":");
+        Serial.print(UdpCommand.remotePort());
+        Serial.println();
+      }
+
+      // ID-FROM-TO filter
+      if(
+        (EnableGroupPrefix==false
+        && String(packetBuffer[0], DEC).toInt()==NET_ID
+        && packetBuffer[1]==TxUdpBuffer[2]  // FROM Switch
+        && packetBuffer[2]== 's'  // TO
+        && packetBuffer[3]== B00000000
+        // && packetBuffer[3]== ':'
+        && packetBuffer[7]== ';')
+        ||
+        (EnableGroupPrefix==true
+        && IdSufix(packetBuffer[0])==IdSufix(NET_ID)
+        && packetBuffer[1]==TxUdpBuffer[2]  // FROM Switch
+        && packetBuffer[2]== 's'  // TO
+        && packetBuffer[3]== B00000000
+        // && packetBuffer[3]== ':'
+        && packetBuffer[7]== ';')
+      ){
+
+        if( EnableGroupPrefix==true && (
+          DetectedRemoteSwPort [IdPrefix(packetBuffer[0])] == 0
+          || (packetBuffer[4]== 'b' && packetBuffer[5]== 'r' && packetBuffer[6]== 'o')
+          || (packetBuffer[4]== 'c' && packetBuffer[5]== 'f' && packetBuffer[6]== 'm')
+          )
+        ){
+          IPAddress TmpAddr = UdpCommand.remoteIP();
+          DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [0]=TmpAddr[0];     // Switch IP addres storage to array
+          DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [1]=TmpAddr[1];
+          DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [2]=TmpAddr[2];
+          DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [3]=TmpAddr[3];
+          DetectedRemoteSwPort [hexToDecBy4bit(IdPrefix(packetBuffer[0]))]=UdpCommand.remotePort();
+          if(EnableSerialDebug==1){
+            Serial.print("Detect controller ID ");
+            Serial.print(IdPrefix(packetBuffer[0]), HEX);
+            Serial.print(" on IP ");
+            Serial.print(DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [0]);
+            Serial.print(".");
+            Serial.print(DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [1]);
+            Serial.print(".");
+            Serial.print(DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [2]);
+            Serial.print(".");
+            Serial.print(DetectedRemoteSw [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] [3]);
+            Serial.print(":");
+            Serial.println(DetectedRemoteSwPort [hexToDecBy4bit(IdPrefix(packetBuffer[0]))] );
+          }
+          if(TxUdpBuffer[2] == 'm'){
+            TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 1);
+          }
+        }
+
+        // RX Broadcast / CFM
+        if((packetBuffer[4]== 'b' && packetBuffer[5]== 'r' && packetBuffer[6]== 'o')
+          || (packetBuffer[4]== 'c' && packetBuffer[5]== 'f' && packetBuffer[6]== 'm')
+          ){
+          if(EnableSerialDebug==1){
+            Serial.print("RX [");
+            Serial.print(packetBuffer[0], HEX);
+            for(int i=1; i<8; i++){
+              Serial.print(char(packetBuffer[i]));
+            }
+            Serial.print(F("] "));
+            Serial.print(UdpCommand.remoteIP());
+            Serial.print(":");
+            Serial.println(UdpCommand.remotePort());
+          }
+          #if !defined(Ser2net) && !defined(XLswitch)
+            pinMode(BCD[1], OUTPUT);
+            digitalWrite(BCD[1], HIGH);
+            delay(100);
+            digitalWrite(BCD[1], LOW);
+            delay(100);
+            pinMode(BCD[1], INPUT);
+          #endif
+          if(packetBuffer[4]== 'b' && packetBuffer[5]== 'r' && packetBuffer[6]== 'o'){
+            TxUDP('s', packetBuffer[2], 'c', 'f', 'm', 1);    // 0=broadcast, 1= direct to RX IP
+            if(TxUdpBuffer[2] == 'm'){
+              TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 1);
+            }
+          }
+
+        // RX DATA
+        }else{
+          if(EnableGroupButton==true){
+            CheckGroup();
+          }else{
+            ShiftOutByte[0] = String(packetBuffer[4], DEC).toInt();    // Bank0
+          }
+          ShiftOutByte[1] = String(packetBuffer[5], DEC).toInt();    // Bank1
+          ShiftOutByte[2] = String(packetBuffer[6], DEC).toInt();    // Bank2
+
+          // SHIFT OUT
+          #if defined(ShiftOut)
+            digitalWrite(ShiftOutLatchPin, LOW);  // když dáme latchPin na LOW mužeme do registru poslat data
+            shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[2]);
+            shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[1]);
+            shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[0]);
+            digitalWrite(ShiftOutLatchPin, HIGH);    // jakmile dáme latchPin na HIGH data se objeví na výstupu
+            if(EnableSerialDebug==1){
+              Serial.println("ShiftOut");
+            }
+          #endif
+
+          if(EnableSerialDebug==1){
+            // Serial.println();
+            Serial.print(F("RX ["));
+            Serial.print(packetBuffer[0], HEX);
+            for(int i=1; i<4; i++){
+              Serial.print(char(packetBuffer[i]));
+            }
+            Serial.print((byte)packetBuffer[4], BIN);
+            Serial.print(F("|"));
+            Serial.print((byte)packetBuffer[5], BIN);
+            Serial.print(F("|"));
+            Serial.print((byte)packetBuffer[6], BIN);
+            Serial.print(F(";] "));
+            Serial.print(UdpCommand.remoteIP());
+            Serial.print(F(":"));
+            Serial.println(UdpCommand.remotePort());
+          }
+          if(UdpCommand.remotePort() != DetectedRemoteSwPort[hexToDecBy4bit(IdPrefix(packetBuffer[0]))] && EnableGroupPrefix==true){
+            // if(EnableSerialDebug==1){
+              Serial.print(F("** Change ip-port ID "));
+              Serial.print(IdPrefix(packetBuffer[0]), HEX);
+              Serial.print(F(" (OLD-"));
+              Serial.print(DetectedRemoteSwPort[hexToDecBy4bit(IdPrefix(packetBuffer[0]))]);
+              Serial.print(F(" NEW-"));
+              Serial.print(UdpCommand.remotePort());
+              Serial.println(F(") **"));
+            // }
+            DetectedRemoteSwPort[hexToDecBy4bit(IdPrefix(packetBuffer[0]))]=UdpCommand.remotePort();
+          }
+          TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
+          #if defined(XLswitch)
+            if(TxUdpBuffer[2]=='m'){
+              LcdNeedRefresh=2;
+            }
+          #endif
+        }
+        WatchdogTimer=millis();
+        // activate
+        if(OutputWatchdog==123456){
+          OutputWatchdog=EEPROM.readUInt(27);
+        }
+      } // filtered end
+      else{
+        if(EnableSerialDebug==1){
+          Serial.println(F("   Different NET-ID, or bad packet format"));
+        }
+      }
+      memset(packetBuffer, 0, sizeof(packetBuffer));   // Clear contents of Buffer
+
+      #if defined(XLswitch)
+        digitalWrite(StatusLedBPin, HIGH);
+        StatusLedB = true;
+        StatusLedBTimer[0]=millis();
+      #endif
+
+    } //end IfUdpPacketSice
+    #endif
+}
+
 //-------------------------------------------------------------------------------------------------------
 
 void CheckGroup(){
@@ -3152,7 +3443,9 @@ void EthEvent(WiFiEvent_t event)
         TxUDP('s', packetBuffer[2], ShiftOutByte[0], ShiftOutByte[1], ShiftOutByte[2], 0);
       }
       // EnableSerialDebug=0;
-      LcdNeedRefresh=100;
+      #if defined(XLswitch)
+          LcdNeedRefresh=100;
+      #endif
       break;
 
     case SYSTEM_EVENT_ETH_DISCONNECTED:
@@ -3526,96 +3819,97 @@ Vypinaci Paket
 }
 
 //-------------------------------------------------------------------------------------------------------
+#if defined(XLswitch)
+  unsigned long testFastLines(uint16_t color1, uint16_t color2) {
+    unsigned long start;
+    int           x, y, w = tft.width(), h = tft.height();
 
-unsigned long testFastLines(uint16_t color1, uint16_t color2) {
-  unsigned long start;
-  int           x, y, w = tft.width(), h = tft.height();
-
-  tft.fillScreen(ILI9341_BLACK);
-  start = micros();
-  for(y=0; y<h; y+=5) tft.drawFastHLine(0, y, w, color1);
-  for(x=0; x<w; x+=5) tft.drawFastVLine(x, 0, h, color2);
-
-  return micros() - start;
-}
-
-unsigned long testFilledRects(uint16_t color1, uint16_t color2) {
-  unsigned long start, t = 0;
-  int           n, i, i2,
-                cx = tft.width()  / 2 - 1,
-                cy = tft.height() / 2 - 1;
-
-  tft.fillScreen(ILI9341_BLACK);
-  n = min(tft.width(), tft.height());
-  for(i=n; i>0; i-=6) {
-    i2    = i / 2;
+    tft.fillScreen(ILI9341_BLACK);
     start = micros();
-    tft.fillRect(cx-i2, cy-i2, i, i, color1);
-    t    += micros() - start;
-    // Outlines are not included in timing results
-    tft.drawRect(cx-i2, cy-i2, i, i, color2);
-    yield();
+    for(y=0; y<h; y+=5) tft.drawFastHLine(0, y, w, color1);
+    for(x=0; x<w; x+=5) tft.drawFastVLine(x, 0, h, color2);
+
+    return micros() - start;
   }
 
-  return t;
-}
+  unsigned long testFilledRects(uint16_t color1, uint16_t color2) {
+    unsigned long start, t = 0;
+    int           n, i, i2,
+                  cx = tft.width()  / 2 - 1,
+                  cy = tft.height() / 2 - 1;
 
-bool Get_yes_no(void){
-TS_Point p;
-    tft.setTextColor(ILI9341_WHITE);  tft.setTextSize(3);
-
-    tft.fillRoundRect(20,250, 100, 50,8, ILI9341_RED);
-    tft.setCursor(56, 265);
-    tft.println("NO");
-    tft.drawRoundRect(20,250, 100, 50, 8, ILI9341_WHITE);
-
-    tft.fillRoundRect(120,250, 100, 50,8, ILI9341_GREEN);
-    tft.setCursor(144, 265);
-    tft.println("YES");
-    tft.drawRoundRect(120,250, 100, 50, 8, ILI9341_WHITE);
-
-
-while (1){
-      delay(50);
-    p = ts.getPoint();
-
-    if (p.z != 129){
-
-
-      p.x = map(p.x, TS_MINX, TS_MAXX, 0, tft.width());
-      p.y = map(p.y, TS_MINY, TS_MAXY, 0, tft.height());
-      p.y = 320 - p.y;
-
-      //  tft.fillCircle(p.x, p.y, 5, ILI9341_YELLOW);
-
-
-    if ((p.y > 250) && (p.y<300)){
-
-      if ((p.x> 20) && (p.x < 220)){
-            if (p.x>120)
-            {
-              tft.fillRoundRect(120,250, 100, 50,8, ILI9341_OLIVE);
-              tft.setCursor(144, 265);
-              tft.println("YES");
-              tft.drawRoundRect(120,250, 100, 50, 8, ILI9341_WHITE);
-
-              delay(500);
-              return true;
-            }
-                   else{
-
-                     tft.fillRoundRect(20,250, 100, 50,8, ILI9341_OLIVE);
-                     tft.setCursor(56, 265);
-                     tft.println("NO");
-                     tft.drawRoundRect(20,250, 100, 50, 8, ILI9341_WHITE);
-
-                        delay(500);
-                     return false;
-                   }
-       }
-
+    tft.fillScreen(ILI9341_BLACK);
+    n = min(tft.width(), tft.height());
+    for(i=n; i>0; i-=6) {
+      i2    = i / 2;
+      start = micros();
+      tft.fillRect(cx-i2, cy-i2, i, i, color1);
+      t    += micros() - start;
+      // Outlines are not included in timing results
+      tft.drawRect(cx-i2, cy-i2, i, i, color2);
+      yield();
     }
 
+    return t;
   }
-}
-}
+
+  bool Get_yes_no(void){
+  TS_Point p;
+      tft.setTextColor(ILI9341_WHITE);  tft.setTextSize(3);
+
+      tft.fillRoundRect(20,250, 100, 50,8, ILI9341_RED);
+      tft.setCursor(56, 265);
+      tft.println("NO");
+      tft.drawRoundRect(20,250, 100, 50, 8, ILI9341_WHITE);
+
+      tft.fillRoundRect(120,250, 100, 50,8, ILI9341_GREEN);
+      tft.setCursor(144, 265);
+      tft.println("YES");
+      tft.drawRoundRect(120,250, 100, 50, 8, ILI9341_WHITE);
+
+
+  while (1){
+        delay(50);
+      p = ts.getPoint();
+
+      if (p.z != 129){
+
+
+        p.x = map(p.x, TS_MINX, TS_MAXX, 0, tft.width());
+        p.y = map(p.y, TS_MINY, TS_MAXY, 0, tft.height());
+        p.y = 320 - p.y;
+
+        //  tft.fillCircle(p.x, p.y, 5, ILI9341_YELLOW);
+
+
+      if ((p.y > 250) && (p.y<300)){
+
+        if ((p.x> 20) && (p.x < 220)){
+              if (p.x>120)
+              {
+                tft.fillRoundRect(120,250, 100, 50,8, ILI9341_OLIVE);
+                tft.setCursor(144, 265);
+                tft.println("YES");
+                tft.drawRoundRect(120,250, 100, 50, 8, ILI9341_WHITE);
+
+                delay(500);
+                return true;
+              }
+                     else{
+
+                       tft.fillRoundRect(20,250, 100, 50,8, ILI9341_OLIVE);
+                       tft.setCursor(56, 265);
+                       tft.println("NO");
+                       tft.drawRoundRect(20,250, 100, 50, 8, ILI9341_WHITE);
+
+                          delay(500);
+                       return false;
+                     }
+         }
+
+      }
+
+    }
+  }
+  }
+#endif
