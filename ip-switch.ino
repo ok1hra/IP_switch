@@ -31,6 +31,7 @@ Remote USB access
 HARDWARE ESP32-GATEWAY/ESP32-POE
 
 Changelog:
+2020-08 - show used gpio in CLI
 2020-03 - support XL switch on ESP32-POE https://www.olimex.com/Products/IoT/ESP32/ESP32-POE/
         - support Icom CI-V Band Decoder
         - support TFT LCD by https://www.olimex.com/Products/Modules/LCD/MOD-LCD2-8RTP/
@@ -54,6 +55,7 @@ Changelog:
 2018-08 add Band decoder support
 
 ToDo
+- esp32 watchdog
 - telnet inactivity watchdog > close
 - custom name for outputs
 - https://github.com/espressif/arduino-esp32/blob/master/libraries/Update/examples/AWS_S3_OTA_Update/AWS_S3_OTA_Update.ino
@@ -63,7 +65,7 @@ ToDo
 
 // #define PCBrev04                    // Enable for ESP32-GATEWAY PCB revision 0.4 or later
 // #define XLswitch                       // Enable for XL switch hardware with ESP32-POE
-const char* REV = "20200405";
+const char* REV = "20200814";
 const char* otaPassword = "remoteqth";
 
 //-------------------------------------------------------------------------------------------------------
@@ -120,9 +122,10 @@ byte XLswitchOutputs[4][2];          // 4 trx, 2 byte = 16 bit
 // #define WIFI                        // Enable ESP32 WIFI (DHCP IPv4)
 const char* ssid     = "";
 const char* password = "";
+
 char key[100];
 byte InputByte[21];
-#define Ser2net                  // Serial to ip proxy - DISABLE if board revision 0.3 or lower
+// #define Ser2net                  // Serial to ip proxy - DISABLE if board revision 0.3 or lower
 #define EnableOTA                // Enable flashing ESP32 Over The Air
 bool HW_BCD_SW = 0;              // enable hardware ID board bcd switch (disable if not installed)
 int NumberOfEncoderOutputs = 8;  // 2-16
@@ -142,9 +145,9 @@ unsigned int DetectedRemoteSwPort[16];
 
 const int SERIAL_BAUDRATE = 115200; // serial debug baudrate
 int SERIAL1_BAUDRATE; // serial1 to IP baudrate
-#if defined(Ser2net) && !defined(XLswitch)
+// #if defined(Ser2net) && !defined(XLswitch)
   int incomingByte = 0;   // for incoming serial data
-#endif
+// #endif
 
 #if !defined(Ser2net) && !defined(XLswitch)
   const int BCD[4] = {34, 33, 32, 10};  // BCD encoder PINs
@@ -2170,6 +2173,8 @@ void ListCommands(int OUT){
     Prn(OUT, 0," ");
     Prn(OUT, 1, String(ShiftOutByte[2], BIN) );
   }
+  Prn(OUT, 0, "  ShiftOut GPIO [data, latch, clock]: ");
+  Prn(OUT, 1, String(ShiftOutDataPin)+", "+String(ShiftOutLatchPin)+", "+String(ShiftOutClockPin));
   Prn(OUT, 1,"---------------------------------------------");
   Prn(OUT, 1,"  You can change source, with send character:");
   if(TxUdpBuffer[2]=='m'){
