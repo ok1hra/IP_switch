@@ -31,6 +31,8 @@ Remote USB access
 HARDWARE ESP32-GATEWAY/ESP32-POE
 
 Changelog:
+2020-09 - fix enter number in CLI
+          add WatchDogTimer
 2020-08 - show used gpio in CLI
 2020-03 - support XL switch on ESP32-POE https://www.olimex.com/Products/IoT/ESP32/ESP32-POE/
         - support Icom CI-V Band Decoder
@@ -65,7 +67,7 @@ ToDo
 
 // #define PCBrev04                    // Enable for ESP32-GATEWAY PCB revision 0.4 or later
 // #define XLswitch                       // Enable for XL switch hardware with ESP32-POE
-const char* REV = "20200814";
+const char* REV = "20200915";
 const char* otaPassword = "remoteqth";
 
 //-------------------------------------------------------------------------------------------------------
@@ -180,6 +182,11 @@ unsigned int RebootWatchdog;
 unsigned int OutputWatchdog;
 unsigned long WatchdogTimer=0;
 
+// 73 seconds WDT (WatchDogTimer)
+#include <esp_task_wdt.h>
+#define WDT_TIMEOUT 73
+long WdtTimer=0;
+
 WiFiServer server(HTTP_SERVER_PORT);
 bool DHCP_ENABLE = 1;
 // Client variables
@@ -222,7 +229,7 @@ String HTTP_req;
   const int ShiftOutDataPin = 33;
   const int ShiftOutLatchPin = 32;
   const int ShiftOutClockPin = 4;
-  byte ShiftOutByte[3];
+  byte ShiftOutByte[5];
 #else
     const int ShiftOutDataPin = 17;
     const int ShiftOutLatchPin = 16;
@@ -483,8 +490,12 @@ void setup() {
       EEPROM.writeChar(i, RandomChar());
       Serial.print("*");
     }
-    EEPROM.commit();
     Serial.println();
+    // to defaults
+    IncomingSwitchUdpPort=88;
+    EEPROM.writeInt(22, IncomingSwitchUdpPort);
+    BroadcastPort=IncomingSwitchUdpPort;
+    EEPROM.commit();
   }
   // read
   for(int i=41; i<141; i++){
@@ -655,9 +666,25 @@ void setup() {
   #if defined(XLswitchCIV) && defined(XLswitch)
     Serial_one.begin(SERIAL1_BAUDRATE, SERIAL_8N1, RX1, TX1);
   #endif
+  #if defined(XLswitch)
+    digitalWrite(ShiftOutLatchPin, LOW);  // když dáme latchPin na LOW mužeme do registru poslat data
+    shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, B10000000);
+    shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, B00000000);
+    shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, B00000000);
+    shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, B00000000);
+    shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, B00000000);
+    digitalWrite(ShiftOutLatchPin, HIGH);    // jakmile dáme latchPin na HIGH data se objeví na výstupu
+  #endif
 
   TelnetServer.begin(TelnetServerIPport);
   // TelnetlServer.setNoDelay(true);
+
+  // WDT
+  esp_task_wdt_init(WDT_TIMEOUT, true); //enable panic so ESP32 restarts
+  esp_task_wdt_add(NULL); //add current thread to WDT watch
+  WdtTimer=millis();
+
+
 }
 
 //-------------------------------------------------------------------------------------------------------
@@ -679,6 +706,7 @@ void loop() {
   #if defined(EnableOTA)
    ArduinoOTA.handle();
   #endif
+  // Demo();
 }
 // SUBROUTINES -------------------------------------------------------------------------------------------------------
 void CIV(){
@@ -958,7 +986,17 @@ void LcdDisplay() { // 320x240 px
               }else{
                 tft.setCursor(RowSpace*j-9*5+(j-9)*6, LineSpace*i+18+6);
               }
+              // TX
               tft.print(j+1);
+              if(j<10){
+                tft.setCursor(RowSpace*j-j*5, LineSpace*i+18+6+LineSpace/2);
+              }else{
+                tft.setCursor(RowSpace*j-9*5+(j-9)*6, LineSpace*i+18+6+LineSpace/2);
+              }
+              // RX
+              tft.print(j+1);
+
+
               // tft.fillRoundRect(5+j*39, 28+i*space+5, 34, 34, 3, ILI9341_LIGHTGREY);
               // tft.fillRoundRect(5+j*39, 28+i*space+5+39, 34, 34, 3, ILI9341_LIGHTGREY);
             }
@@ -993,27 +1031,29 @@ void LcdDisplay() { // 320x240 px
         tft.print(String(REV));
       }
 
-      // CI-V
-      if(LcdNeedRefresh==1){
-        tft.fillRect(155, 170, 35, 22, ILI9341_BLACK);
-        tft.setCursor(155,170);
-        tft.setTextColor(ILI9341_LIGHTGREY);
-        tft.setTextSize(3);
-        tft.print(BAND);
+      #if defined(XLswitchCIV)
+        // CI-V
+        if(LcdNeedRefresh==1){
+          tft.fillRect(155, 170, 35, 22, ILI9341_BLACK);
+          tft.setCursor(155,170);
+          tft.setTextColor(ILI9341_LIGHTGREY);
+          tft.setTextSize(3);
+          tft.print(BAND);
 
-        tft.fillRect(70, 200, 180, 22, ILI9341_BLACK);
-        tft.setCursor(70,200);
-        tft.setTextColor(ILI9341_GREENYELLOW);
-        tft.setTextSize(3);
-        int longer=String(freq/1000).length();
-        if(longer<5){
-          tft.print(" ");
+          tft.fillRect(70, 200, 180, 22, ILI9341_BLACK);
+          tft.setCursor(70,200);
+          tft.setTextColor(ILI9341_GREENYELLOW);
+          tft.setTextSize(3);
+          int longer=String(freq/1000).length();
+          if(longer<5){
+            tft.print(" ");
+          }
+          tft.print(String(freq/1000).substring(0, longer-3));
+          tft.print(".");
+          tft.print(String(freq/1000).substring(longer-3, longer));
+          tft.print(" kHz");
         }
-        tft.print(String(freq/1000).substring(0, longer-3));
-        tft.print(".");
-        tft.print(String(freq/1000).substring(longer-3, longer));
-        tft.print(" kHz");
-      }
+      #endif
 
       // IP-SW
       if(LcdNeedRefresh==2){
@@ -1190,6 +1230,16 @@ byte LowByte(int ID){
 
 //-------------------------------------------------------------------------------------------------------
 void Watchdog(){
+
+  // WDT
+  if(millis()-WdtTimer > 60000){
+    esp_task_wdt_reset();
+    WdtTimer=millis();
+    if(EnableSerialDebug==true){
+      Prn(3, 0,"WDT reset ");
+      Prn(3, 1, String(millis()/1000) );
+    }
+  }
 
   if(RebootWatchdog > 0 && millis()-WatchdogTimer > RebootWatchdog*60000){
     Serial.println();
@@ -1440,7 +1490,12 @@ void CLI(){
 
     // w
     }else if(incomingByte==119 && TxUdpBuffer[2]!='n'){
-      Prn(OUT, 1,"Input reboot watchdog in minutes (0-10080), 0-disable and press [enter]");
+      Prn(OUT, 0,"Input reboot watchdog in minutes (0-10080), 0-disable and press ");
+      if(TelnetAuthorized==true){
+        Prn(OUT, 1,"[enter]");
+      }else{
+        Prn(OUT, 1,"[;]");
+      }
       Prn(OUT, 1,"recomended 1440 (1 day)");
       Enter();
       for (int i=InputByte[0]; i>0; i--){
@@ -1460,7 +1515,12 @@ void CLI(){
 
     // W
     }else if(incomingByte==87 && TxUdpBuffer[2]!='n'){
-      Prn(OUT, 1,"Input clear output watchdog in minutes (0-10080), 0-disable and press [enter]");
+      Prn(OUT, 0,"Input clear output watchdog in minutes (0-10080), 0-disable and press ");
+      if(TelnetAuthorized==true){
+        Prn(OUT, 1,"[enter]");
+      }else{
+        Prn(OUT, 1,"[;]");
+      }
       Prn(OUT, 1,"note: if you need clear output after reboot watchdog, set smaller than it");
       Enter();
       for (int i=InputByte[0]; i>0; i--){
@@ -1480,7 +1540,12 @@ void CLI(){
 
     // <
     }else if(incomingByte==60 && TxUdpBuffer[2]!='n'){
-      Prn(OUT, 1,"write UDP port (1-65535) and press [enter]");
+      Prn(OUT, 0,"write UDP port (1-65535) and press ");
+      if(TelnetAuthorized==true){
+        Prn(OUT, 1,"[enter]");
+      }else{
+        Prn(OUT, 1,"[;]");
+      }
       Enter();
       for (int i=InputByte[0]; i>0; i--){
         intBuf = intBuf + ((InputByte[i]-48)*mult);
@@ -1502,7 +1567,12 @@ void CLI(){
 
     // /
     }else if(incomingByte==47 && TxUdpBuffer[2] == 'm'){
-      Prn(OUT, 1,"write encoder rannge number (2-16) and press [enter]");
+      Prn(OUT, 0,"write encoder rannge number (2-16) and press ");
+      if(TelnetAuthorized==true){
+        Prn(OUT, 1,"[enter]");
+      }else{
+        Prn(OUT, 1,"[;]");
+      }
       Enter();
       for (int i=InputByte[0]; i>0; i--){
         intBuf = intBuf + ((InputByte[i]-48)*mult);
@@ -1716,6 +1786,7 @@ void CLI(){
             EEPROM.commit();
             Prn(OUT, 1,"");
             Prn(OUT, 1,"  Eeprom erased done");
+            ESP.restart();
           }else{
             Prn(OUT, 1,"  Erase aborted");
           }
@@ -1766,7 +1837,12 @@ void CLI(){
     // (
     #if defined(Ser2net) || defined(XLswitchCIV)
     }else if(incomingByte==40){
-      Prn(OUT, 1,"Write baudrate and press [enter]");
+      Prn(OUT, 0,"Write baudrate and press ");
+      if(TelnetAuthorized==true){
+        Prn(OUT, 1,"[enter]");
+      }else{
+        Prn(OUT, 1,"[;]");
+      }
       Enter();
       for (int i=InputByte[0]; i>0; i--){
         intBuf = intBuf + ((InputByte[i]-48)*mult);
@@ -1790,7 +1866,12 @@ void CLI(){
     // )
     #if defined(Ser2net) && !defined(XLswitch)
     }else if(incomingByte==41){
-      Prn(OUT, 1,"Write IP port (1-65535) and press [enter]");
+      Prn(OUT, 0,"Write IP port (1-65535) and press ");
+      if(TelnetAuthorized==true){
+        Prn(OUT, 1,"[enter]");
+      }else{
+        Prn(OUT, 1,"[;]");
+      }
       Enter();
       for (int i=InputByte[0]; i>0; i--){
         intBuf = intBuf + ((InputByte[i]-48)*mult);
@@ -1884,7 +1965,7 @@ void Enter(){
     while(br==false) {
       if(Serial.available()){
         incomingByte=Serial.read();
-        if(incomingByte==13){
+        if(incomingByte==13 || incomingByte==59){ // CR or ;
           br=true;
           Serial.println("");
         }else{
@@ -2092,13 +2173,15 @@ void ListCommands(int OUT){
   #else
     Prn(OUT, 1,"| WIFI OFF");
   #endif
-  Prn(OUT, 0,"  OTA ");
-  #if defined(EnableOTA)
-    Prn(OUT, 0,"enable, password: ");
-    Prn(OUT, 1, otaPassword);
-  #else
-    Prn(OUT, 1,"disable");
-  #endif
+    if(OUT==0){
+      Prn(OUT, 0,"  OTA ");
+      #if defined(EnableOTA)
+        Prn(OUT, 0,"enable, password: ");
+        Prn(OUT, 1, otaPassword);
+      #else
+        Prn(OUT, 1,"disable");
+      #endif
+    }
   if(TxUdpBuffer[2]!='n'){
     // Serial.print("  Key: ");
     // Serial.println(String(key));
@@ -2749,15 +2832,23 @@ void RX_UDP_XLswitch(){
           }else{
             ShiftOutByte[0] = String(packetBuffer[4], DEC).toInt();    // Bank0
           }
-          ShiftOutByte[1] = String(packetBuffer[5], DEC).toInt();    // Bank1
-          ShiftOutByte[2] = String(packetBuffer[6], DEC).toInt();    // Bank2
+          // select between A/B
+          if(bitRead(ShiftOutByte[0], 0)==0){
+            ShiftOutByte[1] = String(packetBuffer[5], DEC).toInt();    // Bank1
+            ShiftOutByte[2] = String(packetBuffer[6], DEC).toInt();    // Bank2
+          }else{
+            ShiftOutByte[3] = String(packetBuffer[5], DEC).toInt();    // Bank1
+            ShiftOutByte[4] = String(packetBuffer[6], DEC).toInt();    // Bank2
+          }
 
           // SHIFT OUT
           #if defined(ShiftOut)
             digitalWrite(ShiftOutLatchPin, LOW);  // když dáme latchPin na LOW mužeme do registru poslat data
+            shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[4]);
+            shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[3]);
             shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[2]);
             shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[1]);
-            shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[0]);
+            // shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[0]);  // buttons
             digitalWrite(ShiftOutLatchPin, HIGH);    // jakmile dáme latchPin na HIGH data se objeví na výstupu
             if(EnableSerialDebug==1){
               Serial.println("ShiftOut");
@@ -2771,11 +2862,16 @@ void RX_UDP_XLswitch(){
             for(int i=1; i<4; i++){
               Serial.print(char(packetBuffer[i]));
             }
-            Serial.print((byte)packetBuffer[4], BIN);
+            // Serial.print((byte)packetBuffer[4], BIN);
+            Serial.print((byte)ShiftOutByte[1], BIN);
             Serial.print(F("|"));
-            Serial.print((byte)packetBuffer[5], BIN);
+            // Serial.print((byte)packetBuffer[5], BIN);
+            Serial.print((byte)ShiftOutByte[2], BIN);
             Serial.print(F("|"));
-            Serial.print((byte)packetBuffer[6], BIN);
+            // Serial.print((byte)packetBuffer[6], BIN);
+            Serial.print((byte)ShiftOutByte[3], BIN);
+            Serial.print(F("|"));
+            Serial.print((byte)ShiftOutByte[4], BIN);
             Serial.print(F(";] "));
             Serial.print(UdpCommand.remoteIP());
             Serial.print(F(":"));
