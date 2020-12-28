@@ -31,6 +31,7 @@ Remote USB access
 HARDWARE ESP32-GATEWAY/ESP32-POE
 
 Changelog:
+2020-12 - fix ifdef pinout setting
 2020-09 - fix enter number in CLI
           add WatchDogTimer
 2020-08 - show used gpio in CLI
@@ -65,9 +66,9 @@ ToDo
 */
 //-------------------------------------------------------------------------------------------------------
 
-// #define PCBrev04                    // Enable for ESP32-GATEWAY PCB revision 0.4 or later
-// #define XLswitch                       // Enable for XL switch hardware with ESP32-POE
-const char* REV = "20200915";
+#define PCBrev04                    // Enable for ESP32-GATEWAY PCB revision 0.4 or later
+// #define XLswitch                 // Enable for XL switch hardware with ESP32-POE
+const char* REV = "20201228";
 const char* otaPassword = "remoteqth";
 
 //-------------------------------------------------------------------------------------------------------
@@ -151,7 +152,7 @@ int SERIAL1_BAUDRATE; // serial1 to IP baudrate
   int incomingByte = 0;   // for incoming serial data
 // #endif
 
-#if !defined(Ser2net) && !defined(XLswitch)
+#if !defined(Ser2net) && !defined(XLswitch) && !defined(PCBrev04)
   const int BCD[4] = {34, 33, 32, 10};  // BCD encoder PINs
 #endif
 
@@ -221,20 +222,20 @@ String HTTP_req;
   HardwareSerial Serial_one(1);
 #endif
 #if defined(PCBrev04)
-    const int ShiftOutDataPin = 32;
-    const int ShiftOutLatchPin = 33;
-    const int ShiftOutClockPin = 5;
-    byte ShiftOutByte[3];
+  const int ShiftOutClockPin = 12;
+  const int ShiftOutLatchPin = 32;
+  const int ShiftOutDataPin = 33;
+  byte ShiftOutByte[3];
 #elif defined(XLswitch)
   const int ShiftOutDataPin = 33;
   const int ShiftOutLatchPin = 32;
   const int ShiftOutClockPin = 4;
   byte ShiftOutByte[5];
 #else
-    const int ShiftOutDataPin = 17;
-    const int ShiftOutLatchPin = 16;
-    const int ShiftOutClockPin = 5;
-    byte ShiftOutByte[3];
+  const int ShiftOutDataPin = 17;
+  const int ShiftOutLatchPin = 16;
+  const int ShiftOutClockPin = 5;
+  byte ShiftOutByte[3];
 #endif
 #if defined(XLswitch)
   const int StatusLedAPin = 5;
@@ -365,7 +366,7 @@ void setup() {
     pinMode(ShiftOutDataPin, OUTPUT);
   #endif
 
-  #if !defined(Ser2net) && !defined(XLswitch)
+  #if !defined(Ser2net) && !defined(XLswitch) && !defined(PCBrev04)
     for (int i = 0; i < 4; i++) {
      pinMode(BCD[i], INPUT);
     }
@@ -2208,7 +2209,7 @@ void ListCommands(int OUT){
       // Prn(OUT, 0, "_");
     // }
     Prn(OUT, 0, String(IdSufix(NET_ID), HEX) );
-    #if !defined(Ser2net) && !defined(XLswitch)
+    #if !defined(Ser2net) && !defined(XLswitch) && !defined(PCBrev04)
       if(HW_BCD_SW==true){
         Prn(OUT, 0," [BCD-");
         for (int i = 0; i < 4; i++) {
@@ -2493,7 +2494,7 @@ void Demo(){
 
 byte GetBoardId(){
   byte NETID = 0;
-  #if !defined(Ser2net) && !defined(XLswitch)
+  #if !defined(Ser2net) && !defined(XLswitch) && !defined(PCBrev04)
     if(digitalRead(BCD[0])==0){
       NETID = NETID | (1<<0);    // Set the n-th bit
     }
@@ -2639,7 +2640,7 @@ void RX_UDP(){
             Serial.print(":");
             Serial.println(UdpCommand.remotePort());
           }
-          #if !defined(Ser2net)
+          #if !defined(Ser2net) && !defined(XLswitch) && !defined(PCBrev04)
             pinMode(BCD[1], OUTPUT);
             digitalWrite(BCD[1], HIGH);
             delay(100);
@@ -3500,7 +3501,7 @@ void EthEvent(WiFiEvent_t event)
       #if defined(XLswitch)
         digitalWrite(StatusLedAPin, HIGH);
       #endif
-      #if !defined(Ser2net) && !defined(XLswitch)
+      #if !defined(Ser2net) && !defined(XLswitch) && !defined(PCBrev04)
         pinMode(BCD[1], OUTPUT);
         digitalWrite(BCD[1], HIGH);
         delay(100);
