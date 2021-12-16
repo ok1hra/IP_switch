@@ -31,6 +31,7 @@ Remote USB access
 HARDWARE ESP32-GATEWAY/ESP32-POE
 
 Changelog:
+2021-12 - update for new lib
 2020-12 - fix ifdef pinout setting
 2020-09 - fix enter number in CLI
           add WatchDogTimer
@@ -67,8 +68,8 @@ ToDo
 //-------------------------------------------------------------------------------------------------------
 
 #define PCBrev04                    // Enable for ESP32-GATEWAY PCB revision 0.4 or later
-// #define XLswitch                 // Enable for XL switch hardware with ESP32-POE
-const char* REV = "20201228";
+//#define XLswitch                 // Enable for XL switch hardware with ESP32-POE
+const char* REV = "20211216";
 const char* otaPassword = "remoteqth";
 
 //-------------------------------------------------------------------------------------------------------
@@ -122,6 +123,14 @@ byte XLswitchOutputs[4][2];          // 4 trx, 2 byte = 16 bit
 #endif
 
 #define ETHERNET                       // Enable ESP32 ethernet (DHCP IPv4)
+#define ETH_ADDR 0
+#define ETH_TYPE ETH_PHY_LAN8720
+#define ETH_POWER 5
+#define ETH_MDC 23
+#define ETH_MDIO 18
+#define ETH_CLK ETH_CLOCK_GPIO17_OUT    // settings for ESP32 GATEWAY rev f-g
+// #define ETH_CLK ETH_CLOCK_GPIO0_OUT    // settings for ESP32 GATEWAY rev c and older
+// ETH.begin(ETH_ADDR, ETH_POWER, ETH_MDC, ETH_MDIO, ETH_TYPE, ETH_CLK);
 // #define WIFI                        // Enable ESP32 WIFI (DHCP IPv4)
 const char* ssid     = "";
 const char* password = "";
@@ -580,7 +589,8 @@ void setup() {
 
   #if defined(ETHERNET)
     WiFi.onEvent(EthEvent);
-    ETH.begin();
+    // ETH.begin();
+    ETH.begin(ETH_ADDR, ETH_POWER, ETH_MDC, ETH_MDIO, ETH_TYPE, ETH_CLK);
     if(DHCP_ENABLE==false){
       ETH.config(IPAddress(192, 168, 1, 188), IPAddress(192, 168, 1, 255),IPAddress(255, 255, 255, 0),IPAddress(8, 8, 8, 8));
       //config(IPAddress local_ip, IPAddress gateway, IPAddress subnet, IPAddress dns1 = (uint32_t)0x00000000, IPAddress dns2 = (uint32_t)0x00000000);
@@ -692,17 +702,17 @@ void setup() {
 
 void loop() {
   // blank loop 80us
-  SerialToIp();
+  // SerialToIp();
   http();
   RX_UDP();
-  RX_UDP_XLswitch();
+  // RX_UDP_XLswitch();
   CLI();
   Telnet();
-  CheckNetId();
-  Meter();
+  // CheckNetId();
+  // Meter();
   Watchdog();
-  CIV();
-  LcdDisplay();
+  // CIV();
+  // LcdDisplay();
   // LcdFpsTest();
   #if defined(EnableOTA)
    ArduinoOTA.handle();
@@ -2671,6 +2681,11 @@ void RX_UDP(){
             shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[2]);
             shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[1]);
             shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[0]);
+
+            // shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[0]);
+            // shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, B00000000);
+            // shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[2]);
+            // shiftOut(ShiftOutDataPin, ShiftOutClockPin, LSBFIRST, ShiftOutByte[1]);
             digitalWrite(ShiftOutLatchPin, HIGH);    // jakmile dáme latchPin na HIGH data se objeví na výstupu
             if(EnableSerialDebug==1){
               Serial.println("ShiftOut");
@@ -3477,15 +3492,18 @@ void http(){
 void EthEvent(WiFiEvent_t event)
 {
   switch (event) {
-    case SYSTEM_EVENT_ETH_START:
+    // case SYSTEM_EVENT_ETH_START:
+    case ARDUINO_EVENT_ETH_START:
       Serial.println("ETH  Started");
       //set eth hostname here
-      ETH.setHostname("esp32-ethernet");
+      ETH.setHostname("esp32-eth");
       break;
-    case SYSTEM_EVENT_ETH_CONNECTED:
+    // case SYSTEM_EVENT_ETH_CONNECTED:
+    case ARDUINO_EVENT_ETH_CONNECTED:
       Serial.println("ETH  Connected");
       break;
-    case SYSTEM_EVENT_ETH_GOT_IP:
+    // case SYSTEM_EVENT_ETH_GOT_IP:
+    case ARDUINO_EVENT_ETH_GOT_IP:
       Serial.print("ETH  MAC: ");
       Serial.println(ETH.macAddress());
       Serial.println("===============================");
@@ -3550,14 +3568,16 @@ void EthEvent(WiFiEvent_t event)
       #endif
       break;
 
-    case SYSTEM_EVENT_ETH_DISCONNECTED:
+    // case SYSTEM_EVENT_ETH_DISCONNECTED:
+    case ARDUINO_EVENT_ETH_DISCONNECTED:
       Serial.println("ETH  Disconnected");
       eth_connected = false;
       #if defined(XLswitch)
         digitalWrite(StatusLedAPin, LOW);
       #endif
       break;
-    case SYSTEM_EVENT_ETH_STOP:
+    // case SYSTEM_EVENT_ETH_STOP:
+    case ARDUINO_EVENT_ETH_STOP:
       Serial.println("ETH  Stopped");
       eth_connected = false;
       #if defined(XLswitch)
